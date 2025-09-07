@@ -1,3 +1,5 @@
+[NUTMEG.txt](https://github.com/user-attachments/files/22198807/NUTMEG.txt)
+
 <head>
 <style>
    
@@ -14,7 +16,7 @@ canvas{position:fixed;top:0;left:0;display:block;}
 canvas#audioCanvas{position:static;}
   
 #menuContainer{  font-family:monospace; position:fixed;top:10px;left:10px;display:flex;flex-direction:column; z-index: 9999;}
-  
+
 .menu{background:black;color:white;padding:50px;display:grid;grid-template-columns:1fr;gap:10px;
 
 border:2px
@@ -172,6 +174,10 @@ PANIC BUTTON
     <option value="12">
      Julia GL (3D)
     </option>
+    <option value="13">
+     Metaballs
+    </option>
+
    </select>
    
    <div class="modeGroup fluidOption">
@@ -542,6 +548,108 @@ function getMaskStrength(){
 // Canvas setup
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+
+// ===== Metaballs mode (canvas-based) =====
+let metaBallCount = 8, metaSpeed = 1, metaResolution = 100;
+let metaballs = [];
+let metaOff = document.createElement('canvas');
+let metaOffCtx = metaOff.getContext('2d');
+
+function initMetaballs() {
+  metaballs = [];
+  for (let i = 0; i < metaBallCount; i++) {
+    metaballs.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      vx: (Math.random() * 2 - 1) * (metaSpeed * 2 + 0.5),
+      vy: (Math.random() * 2 - 1) * (metaSpeed * 2 + 0.5),
+      r: 60
+    });
+  }
+}
+
+function stepMetaballs() {
+  if (metaballs.length !== metaBallCount) initMetaballs();
+  for (let i = 0; i < metaballs.length; i++) {
+    const b = metaballs[i];
+    b.x += b.vx * overallSpeed;
+    b.y += b.vy * overallSpeed;
+    if (b.x < 0) { b.x = 0; b.vx *= -1; }
+    if (b.x > canvas.width) { b.x = canvas.width; b.vx *= -1; }
+    if (b.y < 0) { b.y = 0; b.vy *= -1; }
+    if (b.y > canvas.height) { b.y = canvas.height; b.vy *= -1; }
+  }
+}
+
+function renderMetaballs() {
+  // Determine sampling resolution based on slider (50..200)
+  const density = Math.max(10, Math.min(400, metaResolution));
+  const iw = Math.max(50, Math.floor(canvas.width * (density / 400)));
+  const ih = Math.max(50, Math.floor(canvas.height * (density / 400)));
+  if (metaOff.width !== iw || metaOff.height !== ih) {
+    metaOff.width = iw; metaOff.height = ih;
+  }
+  const image = metaOffCtx.createImageData(iw, ih);
+  const data = image.data;
+  // Precompute to reduce multiplications
+  for (let y = 0; y < ih; y++) {
+    for (let x = 0; x < iw; x++) {
+      let sum = 0;
+      const sx = x * (canvas.width / iw);
+      const sy = y * (canvas.height / ih);
+      for (let i = 0; i < metaballs.length; i++) {
+        const b = metaballs[i];
+        const dx = sx - b.x;
+        const dy = sy - b.y;
+        const dist2 = dx*dx + dy*dy + 0.0001;
+        sum += (b.r * b.r) / dist2;
+      }
+      // Map field to grayscale; emphasize edges
+      // Normalize-ish: threshold around 1.0
+      const val = Math.max(0, Math.min(1, sum * 0.8));
+      const c = Math.floor(val * 255);
+      const idx = (y * iw + x) * 4;
+      data[idx] = c;
+      data[idx+1] = c;
+      data[idx+2] = 255; // slight tint to see it clearly
+      data[idx+3] = 255;
+    }
+  }
+  metaOffCtx.putImageData(image, 0, 0);
+  // Composite scaled
+  const prev = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(metaOff, 0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = prev;
+}
+
+// Install UI for metaballs dynamically to avoid template edits
+(function installMetaballsUI(){
+  try {
+    const controls = document.getElementById('controls');
+    if (!controls || document.getElementById('metaBallCount')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'modeGroup metaballsOption';
+    wrap.innerHTML = `
+      <label id="metaBallCountLabel">Ball Count
+        <input id="metaBallCount" type="range" min="3" max="20" step="1" value="8">
+      </label>
+      <label id="metaSpeedLabel">Speed
+        <input id="metaSpeed" type="range" min="0.1" max="3" step="0.1" value="1">
+      </label>
+      <label id="metaResolutionLabel">Resolution
+        <input id="metaResolution" type="range" min="50" max="200" step="10" value="100">
+      </label>
+    `;
+    controls.appendChild(wrap);
+    document.getElementById('metaBallCount').addEventListener('input', (e)=>{ metaBallCount = parseInt(e.target.value,10)||8; initMetaballs(); });
+    document.getElementById('metaSpeed').addEventListener('input', (e)=>{ metaSpeed = parseFloat(e.target.value)||1; metaballs.forEach(b=>{ b.vx = (Math.sign(b.vx)||1) * (metaSpeed * 2 + 0.5); b.vy = (Math.sign(b.vy)||1) * (metaSpeed * 2 + 0.5); }); });
+    document.getElementById('metaResolution').addEventListener('input', (e)=>{ metaResolution = parseInt(e.target.value,10)||100; });
+  } catch(e) {
+    console.warn('metaballs UI install failed', e);
+  }
+})();
+
 // =RIP : silho samp
 function getSilhouetteI(x, y){
   const img = window.mediaImageData;
@@ -1082,6 +1190,7 @@ function step() {
         case 10: stepJulia2D(); break;
         case 11: stepJulia3D(); break;
         case 12: stepJuliaGL(); break;
+        case 13: stepMetaballs(); break;
 }
     
     if (pulseToggle) {
@@ -1441,6 +1550,7 @@ function render() {
         case 10: renderJulia2D(); break;
         case 11: renderJulia3D(); break;
         case 12: renderJuliaGL(); break;
+        case 13: renderMetaballs(); break;
 }
 
     maskImpactPostRender(fluidMode);
@@ -3514,6 +3624,31 @@ bindRange('juliaConstY','juliaConstY', v=>v, 0.27015);
   document.addEventListener('DOMContentLoaded', updateFractalUI);
 })();
  </script>
+
+
+<!-- Keyboard shortcuts: number keys 1–9 map to modes 1–9, 0 maps to 10. -->
+<script>
+(function () {
+  const modeMap = { '1':'1','2':'2','3':'3','4':'4','5':'5','6':'6','7':'7','8':'8','9':'9','0':'10' };
+
+  document.addEventListener('keydown', function (e) {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    const k = e.key;
+    if (modeMap[k]) {
+      e.preventDefault();
+      if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      e.stopPropagation();
+
+      const modeSelect = document.getElementById('modeSelect');
+      if (!modeSelect) return;
+      modeSelect.value = modeMap[k];
+
+      // Trigger the same effect change as if the user had changed the dropdown
+      modeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, true);
+})();
+</script>
 </body>
 <script>
  // ===== RIPPLE-SPIKE: Julia modes (2D & faux-3D) =====
@@ -3874,3 +4009,6 @@ window.addEventListener('mousemove', function(e){
 })();
 </script>
 
+
+
+</html>
