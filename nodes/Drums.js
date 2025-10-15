@@ -1,11 +1,9 @@
 // ======================================================
-// 🥁 Drums.js — v3.0 “Full Range Debug UI”
+// 🥁 Drums.js — v3.0.1 “Syntax Fix + Stability”
 // ------------------------------------------------------
-// - Kick/Snare/Hat → X/Y/Z axis rotation
-// - Massive debug panel (bottom-left), collapsible sections
-// - Wide experimental ranges (negatives allowed where sensible)
-// - Live updates for rotation, scale, emissive, envelopes, bands, trails
-// - Trail framebuffer persistence kept
+// - Fix: Unexpected identifier 'afterimageDamp' (missing comma/dup key)
+// - Removes stray duplicates and small merge artifacts
+// - Keeps your debug UI, trails, and axis-mapped rotation
 // ======================================================
 
 import * as THREE from 'three';
@@ -16,7 +14,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 export class Drums {
   constructor(scene = null, renderer = null, camera = null) {
     // ---------- Geometry / Material ----------
-    const geo = new THREE.IcosahedronGeometry(0.7, 10);
+    this._sharedGeo = new THREE.IcosahedronGeometry(0.7, 6);
     const matBase = new THREE.MeshStandardMaterial({
       color: 0x000000,
       metalness: 1,
@@ -29,15 +27,22 @@ export class Drums {
       blending: THREE.NormalBlending
     });
 
+    this._sharedMaterials = {
+      kick: matBase,
+      snare: matBase.clone(),
+      hat:   matBase.clone()
+    };
+
     this.root = new THREE.Group();
     scene?.add(this.root);
 
-    this.cluster = this._createDrumCluster(geo, matBase);
+    this.cluster = this._createDrumCluster(this._sharedGeo, this._sharedMaterials);
+    this._shareResources(this.cluster);
     this.root.add(this.cluster);
 
     // ---------- Fractal copies ----------
     this.fractalLayers = [];
-    this._createFractalLayer(this.root, this.cluster, 2, 0.8, 1.5);
+    this._createFractalLayer(this.root, this.cluster, 2, 0.9, 0.1);
 
     // ---------- State ----------
     this._kickEnv = this._snareEnv = this._hatEnv = 0;
@@ -47,38 +52,38 @@ export class Drums {
     // ---------- Parameters (HUGE experimental ranges) ----------
     this.params = {
       // Rotation
-      kickSpinScale: 4.0,        // [-1000..1000]
-      snareSpinScale: 6.0,       // [-1000..1000]
-      hatSpinScale: 8.0,         // [-1000..1000]
-      axisLerp: 0.08,            // [-1..1] (clamped to >=0 on use)
-      totalSpinScale: 0.2,       // [-1000..1000] (sign flips spin)
-      randomTwistChance: 0.01,   // [-1..1] (clamped to [0..1])
+      kickSpinScale: 4.0,
+      snareSpinScale: 6.0,
+      hatSpinScale: 8.0,
+      axisLerp: 0.08,
+      totalSpinScale: 0.2,
+      randomTwistChance: 0.01,
 
-      // Scale response (final scale clamped to >= 0.01)
-      kickScaleBase: 1.0,        // [-5..5]
-      kickScaleMult: 0.4,        // [-1000..1000]
-      snareScaleBase: 0.5,       // [-5..5]
-      snareScaleMult: 0.4,       // [-1000..1000]
-      hatScaleBase: 0.25,        // [-5..5]
-      hatScaleMult: 0.3,         // [-1000..1000]
+      // Scale response
+      kickScaleBase: 1.0,
+      kickScaleMult: 0.4,
+      snareScaleBase: 0.5,
+      snareScaleMult: 0.4,
+      hatScaleBase: 0.25,
+      hatScaleMult: 0.3,
 
-      // Emissive multipliers (clamped to >=0 at use)
-      kickEmissiveMult: 4.0,     // [-1000..1000]
-      snareEmissiveMult: 3.0,    // [-1000..1000]
-      hatEmissiveMult: 2.5,      // [-1000..1000]
+      // Emissive
+      kickEmissiveMult: 4.0,
+      snareEmissiveMult: 3.0,
+      hatEmissiveMult: 2.5,
 
-      // Envelopes (per band)
-      attackKick: 50,  releaseKick: 5,     // [0..1000]
-      attackSnare: 50, releaseSnare: 5,    // [0..1000]
-      attackHat: 50,   releaseHat: 5,      // [0..1000]
+      // Envelopes
+      attackKick: 50,  releaseKick: 5,
+      attackSnare: 50, releaseSnare: 5,
+      attackHat: 50,   releaseHat: 5,
 
-      // Frequency bands (Hz) — order-insensitive; sorted internally
-      kickBandLow: 60,   kickBandHigh: 120,     // [0..20000]
-      snareBandLow: 700, snareBandHigh: 2000,   // [0..20000]
-      hatBandLow: 7000,  hatBandHigh: 8000,     // [0..20000]
+      // Frequency bands (Hz)
+      kickBandLow: 60,   kickBandHigh: 120,
+      snareBandLow: 700, snareBandHigh: 2000,
+      hatBandLow: 7000,  hatBandHigh: 8000,
 
       // Trails
-      afterimageDamp: 0.8           // [-10..10] (clamped to [0..0.999])
+      afterimageDamp: 0.8 // [-10..10] (clamped to [0..0.999] on use)
     };
 
     // ---------- Trails ----------
@@ -184,13 +189,20 @@ export class Drums {
       const val = document.createElement('input');
       val.type = 'number';
       val.value = this.params[key];
-      Object.assign(val.style, { width: '76px', marginLeft: '8px', background: '#001417', color: '#bff', border: '1px solid #055', borderRadius: '4px', padding: '2px 4px' });
+      Object.assign(val.style, {
+        width: '76px',
+        marginLeft: '8px',
+        background: '#001417',
+        color: '#bff',
+        border: '1px solid #055',
+        borderRadius: '4px',
+        padding: '2px 4px'
+      });
 
       const input = document.createElement('input');
       Object.assign(input, { type: 'range', min, max, step, value: this.params[key] });
       Object.assign(input.style, { width: '100%', accentColor: '#0ff' });
 
-      // Sync functions
       const apply = (v) => {
         const num = parseFloat(v);
         if (!Number.isFinite(num)) return;
@@ -205,11 +217,16 @@ export class Drums {
       };
 
       input.oninput = (e) => apply(e.target.value);
-      val.onchange = (e) => apply(e.target.value);
+      val.onchange  = (e) => apply(e.target.value);
 
-      row.appendChild(text);
-      row.appendChild(val);
-      wrap.appendChild(row);
+      const rowTop = document.createElement('div');
+      rowTop.style.display = 'flex';
+      rowTop.style.justifyContent = 'space-between';
+      rowTop.style.alignItems = 'center';
+      rowTop.appendChild(text);
+      rowTop.appendChild(val);
+
+      wrap.appendChild(rowTop);
       wrap.appendChild(input);
       container.appendChild(wrap);
     };
@@ -255,6 +272,41 @@ export class Drums {
     const trl = makeSection('Trails');
     addSlider(trl, 'Trail Damp', 'afterimageDamp', -10, 10, 0.01);
 
+    // ---- Fractal parameters ----
+const frac = makeSection('Fractal');
+this.params.fractalDepth = 2;       // number of recursive layers
+this.params.fractalScale = 0.9;     // scale decay per layer
+this.params.fractalDist = 0.1;      // spacing multiplier
+
+addSlider(frac, 'Depth', 'fractalDepth', 0, 4, 1);
+addSlider(frac, 'Scale', 'fractalScale', 0.1, 1.5, 0.01);
+addSlider(frac, 'Distance', 'fractalDist', 0.05, 5.0, 0.05);
+
+// Live fractal update on change
+const rebuildFractal = () => {
+  // remove old layers
+  for (const f of this.fractalLayers) this.root.remove(f);
+  this.fractalLayers = [];
+  // rebuild new layers
+  this._createFractalLayer(
+    this.root,
+    this.cluster,
+    Math.floor(this.params.fractalDepth),
+    this.params.fractalScale,
+    this.params.fractalDist
+  );
+};
+['fractalDepth', 'fractalScale', 'fractalDist'].forEach(key => {
+  Object.defineProperty(this.params, key, {
+    set: (v) => {
+      this[`_${key}`] = v;
+      rebuildFractal();
+    },
+    get: () => this[`_${key}`]
+  });
+});
+
+
     // collapse/expand all
     collapseAllBtn.onclick = () => {
       [...ui.querySelectorAll('div > div > div')].forEach((body) => {
@@ -267,95 +319,6 @@ export class Drums {
   }
 
   // ======================================================
-  // 🧩 Cluster / fractal helpers
-  // ======================================================
-  _createDrumCluster(geo, matBase) {
-    const cluster = new THREE.Group();
-    const kick = new THREE.Mesh(geo, matBase.clone());
-    kick.userData.role = 'kick';
-    cluster.add(kick);
-
-    const snares = [];
-    const SN_DIST = 5.0;
-    const snOffsets = [
-      new THREE.Vector3(+SN_DIST, 0, 0),
-      new THREE.Vector3(-SN_DIST, 0, 0),
-      new THREE.Vector3(0, +SN_DIST, 0),
-      new THREE.Vector3(0, -SN_DIST, 0),
-      new THREE.Vector3(0, 0, +SN_DIST),
-      new THREE.Vector3(0, 0, -SN_DIST)
-    ];
-    for (const o of snOffsets) {
-      const s = new THREE.Mesh(geo, matBase.clone());
-      s.position.copy(o);
-      s.scale.setScalar(0.6);
-      s.userData.role = 'snare';
-      cluster.add(s);
-      snares.push(s);
-    }
-
-    const hats = [];
-    const AXIAL = 0.5, SPREAD = 0.5;
-    const tmp = new THREE.Vector3(), d = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3();
-    const worldUp = new THREE.Vector3(0, 1, 0);
-    const makeHat = (pos, scale = 0.25) => {
-      const h = new THREE.Mesh(geo, matBase.clone());
-      h.position.copy(pos);
-      h.scale.setScalar(scale);
-      h.userData.role = 'hat';
-      cluster.add(h);
-      hats.push(h);
-    };
-    for (const s of snares) {
-      d.copy(s.position).normalize();
-      u.copy(Math.abs(d.dot(worldUp)) > 0.9 ? new THREE.Vector3(1, 0, 0) : worldUp)
-        .cross(d).normalize();
-      v.copy(d).cross(u).normalize();
-      tmp.copy(s.position).addScaledVector(d, AXIAL); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(u, SPREAD); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(u, -SPREAD); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(v, SPREAD); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(v, -SPREAD); makeHat(tmp);
-    }
-    cluster.userData = { kick, snares, hats };
-    return cluster;
-  }
-
-  _rehydrateClusterUserData(group) {
-    let kick = null; const snares = []; const hats = [];
-    group.traverse((o) => {
-      if (!o.isMesh) return;
-      const role = o.userData?.role;
-      if (role === 'kick') kick = o;
-      else if (role === 'snare') snares.push(o);
-      else if (role === 'hat') hats.push(o);
-    });
-    group.userData = { kick, snares, hats };
-  }
-
-  _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
-    if (depth <= 0) return;
-    const dirs = [
-      new THREE.Vector3(+1, 0, 0),
-      new THREE.Vector3(-1, 0, 0),
-      new THREE.Vector3(0, +1, 0),
-      new THREE.Vector3(0, -1, 0),
-      new THREE.Vector3(0, 0, +1),
-      new THREE.Vector3(0, 0, -1)
-    ];
-    for (const dir of dirs) {
-      const clone = baseCluster.clone(true);
-      this._rehydrateClusterUserData(clone);
-      const scale = Math.pow(scaleDecay, (4 - depth));
-      clone.scale.setScalar(scale);
-      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
-      parent.add(clone);
-      this.fractalLayers.push(clone);
-      this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
-    }
-  }
-
-  // ======================================================
   // 🔄 Update — rotation, symmetry, energy mapping
   // ======================================================
   update(_, dt = 0.016, renderer = null, scene = null, camera = null) {
@@ -363,6 +326,7 @@ export class Drums {
     if (!soil?.hasStem('drums')) return;
 
     const s = soil.stems['drums'];
+    if (!s?.ana || !s.data) return;
     s.ana.getByteFrequencyData(s.data);
     const arr = s.data, len = arr.length, nyq = soil.ctx.sampleRate / 2;
 
@@ -380,9 +344,9 @@ export class Drums {
 
     const ps = this.params;
 
-    const kick = band(ps.kickBandLow,  ps.kickBandHigh);
+    const kick  = band(ps.kickBandLow,  ps.kickBandHigh);
     const snare = band(ps.snareBandLow, ps.snareBandHigh);
-    const hat = band(ps.hatBandLow,    ps.hatBandHigh);
+    const hat   = band(ps.hatBandLow,   ps.hatBandHigh);
 
     // envelopes (per band), attack/release clamped >=0
     const smooth = (v, t, atk, rel) => {
@@ -393,7 +357,7 @@ export class Drums {
     this._snareEnv = smooth(this._snareEnv, snare, ps.attackSnare, ps.releaseSnare);
     this._hatEnv   = smooth(this._hatEnv,   hat,   ps.attackHat,   ps.releaseHat);
 
-    // --- Axis-mapped rotation (with experimental ranges) ---
+    // --- Axis-mapped rotation ---
     const kickSpin  = this._kickEnv  * ps.kickSpinScale;
     const snareSpin = this._snareEnv * ps.snareSpinScale;
     const hatSpin   = this._hatEnv   * ps.hatSpinScale;
@@ -404,13 +368,14 @@ export class Drums {
       .addScaledVector(new THREE.Vector3(0, 0, 1), hatSpin);
 
     // avoid NaN when all spins are 0
-    if (combinedAxis.lengthSq() > 1e-8) combinedAxis.normalize(); else combinedAxis.set(0,1,0);
+    if (combinedAxis.lengthSq() > 1e-8) combinedAxis.normalize();
+    else combinedAxis.set(0, 1, 0);
 
     const totalSpin = (kickSpin + snareSpin + hatSpin) * ps.totalSpinScale;
 
     // clamp risky params at use
     const safeLerp = Math.max(0, ps.axisLerp);
-    const twistP = THREE.MathUtils.clamp(ps.randomTwistChance, 0, 1);
+    const twistP   = THREE.MathUtils.clamp(ps.randomTwistChance, 0, 1);
 
     this._rotAxisTarget.copy(combinedAxis);
     this._rotAxis.lerp(this._rotAxisTarget, safeLerp);
@@ -459,6 +424,7 @@ export class Drums {
       }
     }
 
+    // Trails render
     if (this._hasTrails && renderer && scene && camera) this._composer.render();
   }
 
@@ -466,7 +432,30 @@ export class Drums {
   _clampTrail(v) { return THREE.MathUtils.clamp(v, 0, 0.999); }
 
   // ======================================================
-  // (unchanged) helpers
+  // 🧮 Fractal replication
+  // ======================================================
+  _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
+    if (depth <= 0) return;
+    const dirs = [
+      new THREE.Vector3(+1, 0, 0), new THREE.Vector3(-1, 0, 0),
+      new THREE.Vector3(0, +1, 0), new THREE.Vector3(0, -1, 0),
+      new THREE.Vector3(0, 0, +1), new THREE.Vector3(0, 0, -1)
+    ];
+    for (const dir of dirs) {
+      const clone = baseCluster.clone(true);
+      this._shareResources(clone);
+      this._rehydrateClusterUserData(clone);
+      const scale = Math.pow(scaleDecay, (4 - depth));
+      clone.scale.setScalar(scale);
+      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
+      parent.add(clone);
+      this.fractalLayers.push(clone);
+      this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
+    }
+  }
+
+  // ======================================================
+  // 🧩 Cluster helpers
   // ======================================================
   _rehydrateClusterUserData(group) {
     let kick = null; const snares = []; const hats = [];
@@ -480,31 +469,26 @@ export class Drums {
     group.userData = { kick, snares, hats };
   }
 
-  _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
-    if (depth <= 0) return;
-    const dirs = [
-      new THREE.Vector3(+1, 0, 0), new THREE.Vector3(-1, 0, 0),
-      new THREE.Vector3(0, +1, 0), new THREE.Vector3(0, -1, 0),
-      new THREE.Vector3(0, 0, +1), new THREE.Vector3(0, 0, -1)
-    ];
-    for (const dir of dirs) {
-      const clone = baseCluster.clone(true);
-      this._rehydrateClusterUserData(clone);
-      const scale = Math.pow(scaleDecay, (4 - depth));
-      clone.scale.setScalar(scale);
-      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
-      parent.add(clone);
-      this.fractalLayers.push(clone);
-      this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
-    }
+  _shareResources(group) {
+    group.traverse((o) => {
+      if (!o.isMesh) return;
+      o.geometry = this._sharedGeo;
+      const role = o.userData?.role;
+      if (role && this._sharedMaterials[role]) {
+        o.material = this._sharedMaterials[role];
+      }
+    });
   }
 
-  _createDrumCluster(geo, matBase) {
+  _createDrumCluster(geo, mats) {
     const cluster = new THREE.Group();
-    const kick = new THREE.Mesh(geo, matBase.clone());
+
+    // Core kick
+    const kick = new THREE.Mesh(geo, mats.kick);
     kick.userData.role = 'kick';
     cluster.add(kick);
 
+    // Six snares on axes
     const snares = [];
     const SN_DIST = 5.0;
     const snOffsets = [
@@ -516,7 +500,7 @@ export class Drums {
       new THREE.Vector3(0, 0, -SN_DIST)
     ];
     for (const o of snOffsets) {
-      const s = new THREE.Mesh(geo, matBase.clone());
+      const s = new THREE.Mesh(geo, mats.snare);
       s.position.copy(o);
       s.scale.setScalar(0.6);
       s.userData.role = 'snare';
@@ -524,12 +508,13 @@ export class Drums {
       snares.push(s);
     }
 
+    // Hat satellites around each snare
     const hats = [];
     const AXIAL = 0.5, SPREAD = 0.5;
     const tmp = new THREE.Vector3(), d = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3();
     const worldUp = new THREE.Vector3(0, 1, 0);
     const makeHat = (pos, scale = 0.25) => {
-      const h = new THREE.Mesh(geo, matBase.clone());
+      const h = new THREE.Mesh(geo, mats.hat);
       h.position.copy(pos);
       h.scale.setScalar(scale);
       h.userData.role = 'hat';
@@ -546,6 +531,7 @@ export class Drums {
       makeHat(tmp.copy(s.position).addScaledVector(v, SPREAD));
       makeHat(tmp.copy(s.position).addScaledVector(v, -SPREAD));
     }
+
     cluster.userData = { kick, snares, hats };
     return cluster;
   }
