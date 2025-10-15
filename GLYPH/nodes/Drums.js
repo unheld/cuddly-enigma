@@ -42,6 +42,34 @@ export class Drums {
     this._shareResources(this.cluster);
     this.root.add(this.cluster);
 
+    // ---------- Shared scratch values ----------
+    this._combinedAxis = new THREE.Vector3();
+    this._axisX = new THREE.Vector3(1, 0, 0);
+    this._axisY = new THREE.Vector3(0, 1, 0);
+    this._axisZ = new THREE.Vector3(0, 0, 1);
+    this._quat = new THREE.Quaternion();
+    this._twistOffset = new THREE.Vector3();
+    this._kickColor = new THREE.Color();
+    this._snareColor = new THREE.Color();
+    this._hatColor = new THREE.Color();
+    this._trailSize = new THREE.Vector2();
+    this._trailRenderer = null;
+    this._lastTrailWidth = 0;
+    this._lastTrailHeight = 0;
+    this._lastTrailPixelRatio = 0;
+    this._fractalDirections = [
+      new THREE.Vector3(+1, 0, 0),
+      new THREE.Vector3(-1, 0, 0),
+      new THREE.Vector3(0, +1, 0),
+      new THREE.Vector3(0, -1, 0),
+      new THREE.Vector3(0, 0, +1),
+      new THREE.Vector3(0, 0, -1)
+    ];
+    this._fractalDirScratch = new THREE.Vector3();
+
+    // ---------- Fractal copies ----------
+    this.fractalLayers = [];
+    this._allClusters = [this.cluster];
     // ---------- Fractal copies ----------
     this.fractalLayers = [];
     this._createFractalLayer(this.root, this.cluster, 2, 0.8, 1.5);
@@ -85,6 +113,8 @@ export class Drums {
       hatBandLow: 7000,  hatBandHigh: 8000,     // [0..20000]
 
       // Trails
+      afterimageDamp: 0.8,          // [-10..10] (clamped to [0..0.999])
+      trailResolutionScale: 0.5     // [0.1..1] (downscales FBO resolution)
       afterimageDamp: 0.8           // [-10..10] (clamped to [0..0.999])
     };
 
@@ -99,12 +129,14 @@ export class Drums {
   // 🌠 Trail persistence compositor
   // ======================================================
   _setupTrails(renderer, scene, camera) {
+    this._trailRenderer = renderer;
     this._composer = new EffectComposer(renderer);
     this._composer.addPass(new RenderPass(scene, camera));
     this._afterimage = new AfterimagePass();
     this._afterimage.uniforms['damp'].value = this._clampTrail(this.params.afterimageDamp);
     this._composer.addPass(this._afterimage);
     this._hasTrails = true;
+    this._updateTrailResolution();
   }
 
   // ======================================================
@@ -199,6 +231,11 @@ export class Drums {
 
       // Sync functions
       const apply = (v) => {
+        let num = parseFloat(v);
+        if (!Number.isFinite(num)) return;
+        if (key === 'afterimageDamp') num = this._clampTrail(num);
+        else if (key === 'trailResolutionScale') num = this._clampTrailScale(num);
+
         const num = parseFloat(v);
         if (!Number.isFinite(num)) return;
         this.params[key] = num;
@@ -207,6 +244,9 @@ export class Drums {
 
         // live side-effects
         if (key === 'afterimageDamp' && this._afterimage) {
+          this._afterimage.uniforms['damp'].value = num;
+        } else if (key === 'trailResolutionScale') {
+          this._updateTrailResolution();
           this._afterimage.uniforms['damp'].value = this._clampTrail(num);
         }
       };
@@ -261,6 +301,7 @@ export class Drums {
 
     const trl = makeSection('Trails');
     addSlider(trl, 'Trail Damp', 'afterimageDamp', -10, 10, 0.01);
+    addSlider(trl, 'Trail Res Scale', 'trailResolutionScale', 0.1, 1, 0.05);
 
     // collapse/expand all
     collapseAllBtn.onclick = () => {
@@ -342,6 +383,10 @@ export class Drums {
     const snareSpin = this._snareEnv * ps.snareSpinScale;
     const hatSpin   = this._hatEnv   * ps.hatSpinScale;
 
+    const combinedAxis = this._combinedAxis;
+    combinedAxis.copy(this._axisX).multiplyScalar(kickSpin);
+    combinedAxis.addScaledVector(this._axisY, snareSpin);
+    combinedAxis.addScaledVector(this._axisZ, hatSpin);
     const combinedAxis = new THREE.Vector3()
       .addScaledVector(new THREE.Vector3(1, 0, 0), kickSpin)
       .addScaledVector(new THREE.Vector3(0, 1, 0), snareSpin)
@@ -359,6 +404,16 @@ export class Drums {
     this._rotAxisTarget.copy(combinedAxis);
     this._rotAxis.lerp(this._rotAxisTarget, safeLerp);
 
+    const quat = this._quat.setFromAxisAngle(this._rotAxis, totalSpin * dt);
+    this.root.quaternion.multiplyQuaternions(quat, this.root.quaternion);
+
+    if (Math.random() < twistP && Math.abs(totalSpin) > 0.02) {
+      this._twistOffset.set(
+        (Math.random() - 0.5) * 0.4,
+        (Math.random() - 0.5) * 0.4,
+        (Math.random() - 0.5) * 0.4
+      );
+      this._rotAxisTarget.add(this._twistOffset).normalize();
     const quat = new THREE.Quaternion().setFromAxisAngle(this._rotAxis, totalSpin * dt);
     this.root.quaternion.multiplyQuaternions(quat, this.root.quaternion);
 
@@ -381,6 +436,11 @@ export class Drums {
     const sEm = Math.max(0, this._snareEnv * ps.snareEmissiveMult);
     const hEm = Math.max(0, this._hatEnv   * ps.hatEmissiveMult);
 
+    const kickCol = this._kickColor.set(0xff0000).multiplyScalar(kEm);
+    const snareCol = this._snareColor.set(0x0088ff).multiplyScalar(sEm);
+    const hatCol = this._hatColor.set(0x00ff88).multiplyScalar(hEm);
+
+    for (const c of this._allClusters) {
     const kickCol  = new THREE.Color(0xff0000).multiplyScalar(kEm);
     const snareCol = new THREE.Color(0x0088ff).multiplyScalar(sEm);
     const hatCol   = new THREE.Color(0x00ff88).multiplyScalar(hEm);
@@ -403,11 +463,49 @@ export class Drums {
       }
     }
 
+    if (this._hasTrails && renderer && scene && camera) {
+      if (renderer !== this._trailRenderer) {
+        this._trailRenderer = renderer;
+      }
+      this._ensureTrailResolutionSync(renderer);
+      this._composer.render();
+    }
     if (this._hasTrails && renderer && scene && camera) this._composer.render();
   }
 
   // ===== Utils =====
   _clampTrail(v) { return THREE.MathUtils.clamp(v, 0, 0.999); }
+
+  _clampTrailScale(v) { return THREE.MathUtils.clamp(v, 0.1, 1); }
+
+  _updateTrailResolution() {
+    if (!this._composer || !this._trailRenderer) return;
+    const scale = this._clampTrailScale(this.params.trailResolutionScale ?? 1);
+    const renderer = this._trailRenderer;
+    renderer.getSize(this._trailSize);
+    const basePixelRatio = renderer.getPixelRatio();
+    const pixelRatio = basePixelRatio * scale;
+    this._composer.setPixelRatio(pixelRatio);
+    this._composer.setSize(this._trailSize.x, this._trailSize.y);
+    this._lastTrailWidth = this._trailSize.x;
+    this._lastTrailHeight = this._trailSize.y;
+    this._lastTrailPixelRatio = basePixelRatio;
+  }
+
+  _ensureTrailResolutionSync(renderer) {
+    if (!renderer || renderer !== this._trailRenderer) return;
+    renderer.getSize(this._trailSize);
+    const width = this._trailSize.x;
+    const height = this._trailSize.y;
+    const pixelRatio = renderer.getPixelRatio();
+    if (
+      width !== this._lastTrailWidth ||
+      height !== this._lastTrailHeight ||
+      pixelRatio !== this._lastTrailPixelRatio
+    ) {
+      this._updateTrailResolution();
+    }
+  }
 
 
   // ======================================================
@@ -415,6 +513,7 @@ export class Drums {
   // ======================================================
   _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
     if (depth <= 0) return;
+    for (const dir of this._fractalDirections) {
     const dirs = [
       new THREE.Vector3(+1, 0, 0), new THREE.Vector3(-1, 0, 0),
       new THREE.Vector3(0, +1, 0), new THREE.Vector3(0, -1, 0),
@@ -426,6 +525,11 @@ export class Drums {
       this._rehydrateClusterUserData(clone);
       const scale = Math.pow(scaleDecay, (4 - depth));
       clone.scale.setScalar(scale);
+      this._fractalDirScratch.copy(dir).multiplyScalar(dist * (4 - depth));
+      clone.position.copy(this._fractalDirScratch);
+      parent.add(clone);
+      this.fractalLayers.push(clone);
+      this._allClusters.push(clone);
       clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
       parent.add(clone);
       this.fractalLayers.push(clone);
