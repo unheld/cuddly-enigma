@@ -70,6 +70,8 @@ export class Drums {
     // ---------- Fractal copies ----------
     this.fractalLayers = [];
     this._allClusters = [this.cluster];
+    // ---------- Fractal copies ----------
+    this.fractalLayers = [];
     this._createFractalLayer(this.root, this.cluster, 2, 0.8, 1.5);
 
     // ---------- State ----------
@@ -113,6 +115,7 @@ export class Drums {
       // Trails
       afterimageDamp: 0.8,          // [-10..10] (clamped to [0..0.999])
       trailResolutionScale: 0.5     // [0.1..1] (downscales FBO resolution)
+      afterimageDamp: 0.8           // [-10..10] (clamped to [0..0.999])
     };
 
     // ---------- Trails ----------
@@ -233,6 +236,8 @@ export class Drums {
         if (key === 'afterimageDamp') num = this._clampTrail(num);
         else if (key === 'trailResolutionScale') num = this._clampTrailScale(num);
 
+        const num = parseFloat(v);
+        if (!Number.isFinite(num)) return;
         this.params[key] = num;
         input.value = String(num);
         val.value = String(num);
@@ -242,6 +247,7 @@ export class Drums {
           this._afterimage.uniforms['damp'].value = num;
         } else if (key === 'trailResolutionScale') {
           this._updateTrailResolution();
+          this._afterimage.uniforms['damp'].value = this._clampTrail(num);
         }
       };
 
@@ -381,6 +387,10 @@ export class Drums {
     combinedAxis.copy(this._axisX).multiplyScalar(kickSpin);
     combinedAxis.addScaledVector(this._axisY, snareSpin);
     combinedAxis.addScaledVector(this._axisZ, hatSpin);
+    const combinedAxis = new THREE.Vector3()
+      .addScaledVector(new THREE.Vector3(1, 0, 0), kickSpin)
+      .addScaledVector(new THREE.Vector3(0, 1, 0), snareSpin)
+      .addScaledVector(new THREE.Vector3(0, 0, 1), hatSpin);
 
     // avoid NaN when all spins are 0
     if (combinedAxis.lengthSq() > 1e-8) combinedAxis.normalize(); else combinedAxis.set(0,1,0);
@@ -404,6 +414,17 @@ export class Drums {
         (Math.random() - 0.5) * 0.4
       );
       this._rotAxisTarget.add(this._twistOffset).normalize();
+    const quat = new THREE.Quaternion().setFromAxisAngle(this._rotAxis, totalSpin * dt);
+    this.root.quaternion.multiplyQuaternions(quat, this.root.quaternion);
+
+    if (Math.random() < twistP && Math.abs(totalSpin) > 0.02) {
+      this._rotAxisTarget.add(
+        new THREE.Vector3(
+          (Math.random() - 0.5) * 0.4,
+          (Math.random() - 0.5) * 0.4,
+          (Math.random() - 0.5) * 0.4
+        )
+      ).normalize();
     }
 
     // --- Visuals (scale + emissive with clamps) ---
@@ -420,6 +441,12 @@ export class Drums {
     const hatCol = this._hatColor.set(0x00ff88).multiplyScalar(hEm);
 
     for (const c of this._allClusters) {
+    const kickCol  = new THREE.Color(0xff0000).multiplyScalar(kEm);
+    const snareCol = new THREE.Color(0x0088ff).multiplyScalar(sEm);
+    const hatCol   = new THREE.Color(0x00ff88).multiplyScalar(hEm);
+
+    const allClusters = [this.cluster, ...this.fractalLayers];
+    for (const c of allClusters) {
       const ud = c.userData;
       if (!ud || !ud.kick) continue;
 
@@ -443,6 +470,7 @@ export class Drums {
       this._ensureTrailResolutionSync(renderer);
       this._composer.render();
     }
+    if (this._hasTrails && renderer && scene && camera) this._composer.render();
   }
 
   // ===== Utils =====
@@ -486,6 +514,12 @@ export class Drums {
   _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
     if (depth <= 0) return;
     for (const dir of this._fractalDirections) {
+    const dirs = [
+      new THREE.Vector3(+1, 0, 0), new THREE.Vector3(-1, 0, 0),
+      new THREE.Vector3(0, +1, 0), new THREE.Vector3(0, -1, 0),
+      new THREE.Vector3(0, 0, +1), new THREE.Vector3(0, 0, -1)
+    ];
+    for (const dir of dirs) {
       const clone = baseCluster.clone(true);
       this._shareResources(clone);
       this._rehydrateClusterUserData(clone);
@@ -496,6 +530,9 @@ export class Drums {
       parent.add(clone);
       this.fractalLayers.push(clone);
       this._allClusters.push(clone);
+      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
+      parent.add(clone);
+      this.fractalLayers.push(clone);
       this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
     }
   }
