@@ -1,0 +1,386 @@
+diff --git a/GLYPH/nodes/Drums.js b/GLYPH/nodes/Drums.js
+index 29e63b22321639adfecf8e7c18ccf0f426dc341c..82e19718548575cdbe5a32d9923325ebc4adb1de 100644
+--- a/GLYPH/nodes/Drums.js
++++ b/GLYPH/nodes/Drums.js
+@@ -1,60 +1,67 @@
+ // ======================================================
+ // 🥁 Drums.js — v3.0 “Full Range Debug UI”
+ // ------------------------------------------------------
+ // - Kick/Snare/Hat → X/Y/Z axis rotation
+ // - Massive debug panel (bottom-left), collapsible sections
+ // - Wide experimental ranges (negatives allowed where sensible)
+ // - Live updates for rotation, scale, emissive, envelopes, bands, trails
+ // - Trail framebuffer persistence kept
+ // ======================================================
+ 
+ import * as THREE from 'three';
+ import { AfterimagePass } from 'three/examples/jsm/postprocessing/AfterimagePass.js';
+ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+ 
+ export class Drums {
+   constructor(scene = null, renderer = null, camera = null) {
+     // ---------- Geometry / Material ----------
+-    const geo = new THREE.IcosahedronGeometry(0.7, 10);
+-    const matBase = new THREE.MeshStandardMaterial({
+-      color: 0x000000,
+-      metalness: 1,
+-      roughness: 0,
+-      emissive: 0x000000,
+-      envMapIntensity: 10.2,
+-      transparent: true,
+-      opacity: 0.3,
+-      depthWrite: false,
+-      blending: THREE.NormalBlending
+-    });
++    this._sharedGeo = new THREE.IcosahedronGeometry(0.7, 6);
++    const matBase = new THREE.MeshStandardMaterial({
++      color: 0x000000,
++      metalness: 1,
++      roughness: 0,
++      emissive: 0x000000,
++      envMapIntensity: 10.2,
++      transparent: true,
++      opacity: 0.3,
++      depthWrite: false,
++      blending: THREE.NormalBlending
++    });
++
++    this._sharedMaterials = {
++      kick: matBase,
++      snare: matBase.clone(),
++      hat: matBase.clone()
++    };
+ 
+     this.root = new THREE.Group();
+     scene?.add(this.root);
+ 
+-    this.cluster = this._createDrumCluster(geo, matBase);
++    this.cluster = this._createDrumCluster(this._sharedGeo, this._sharedMaterials);
++    this._shareResources(this.cluster);
+     this.root.add(this.cluster);
+ 
+     // ---------- Fractal copies ----------
+     this.fractalLayers = [];
+     this._createFractalLayer(this.root, this.cluster, 2, 0.8, 1.5);
+ 
+     // ---------- State ----------
+     this._kickEnv = this._snareEnv = this._hatEnv = 0;
+     this._rotAxis = new THREE.Vector3(0.6, 1.0, 0.4).normalize();
+     this._rotAxisTarget = this._rotAxis.clone();
+ 
+     // ---------- Parameters (HUGE experimental ranges) ----------
+     this.params = {
+       // Rotation
+       kickSpinScale: 4.0,        // [-1000..1000]
+       snareSpinScale: 6.0,       // [-1000..1000]
+       hatSpinScale: 8.0,         // [-1000..1000]
+       axisLerp: 0.08,            // [-1..1] (clamped to >=0 on use)
+       totalSpinScale: 0.2,       // [-1000..1000] (sign flips spin)
+       randomTwistChance: 0.01,   // [-1..1] (clamped to [0..1])
+ 
+       // Scale response (final scale clamped to >= 0.01)
+       kickScaleBase: 1.0,        // [-5..5]
+       kickScaleMult: 0.4,        // [-1000..1000]
+       snareScaleBase: 0.5,       // [-5..5]
+@@ -247,140 +254,77 @@ export class Drums {
+     const fft = makeSection('FFT Bands (Hz)');
+     addSlider(fft, 'Kick Low', 'kickBandLow', 0, 20000, 1);
+     addSlider(fft, 'Kick High', 'kickBandHigh', 0, 20000, 1);
+     addSlider(fft, 'Snare Low', 'snareBandLow', 0, 20000, 1);
+     addSlider(fft, 'Snare High', 'snareBandHigh', 0, 20000, 1);
+     addSlider(fft, 'Hat Low', 'hatBandLow', 0, 20000, 1);
+     addSlider(fft, 'Hat High', 'hatBandHigh', 0, 20000, 1);
+ 
+     const trl = makeSection('Trails');
+     addSlider(trl, 'Trail Damp', 'afterimageDamp', -10, 10, 0.01);
+ 
+     // collapse/expand all
+     collapseAllBtn.onclick = () => {
+       [...ui.querySelectorAll('div > div > div')].forEach((body) => {
+         if (body.style && body.style.display !== 'none') body.style.display = 'none';
+       });
+       ui.querySelectorAll('span').forEach((s) => { if (s.textContent === '▼') s.textContent = '►'; });
+     };
+ 
+     document.body.appendChild(ui);
+   }
+ 
+   // ======================================================
+   // 🧩 Cluster / fractal helpers
+   // ======================================================
+-  _createDrumCluster(geo, matBase) {
+-    const cluster = new THREE.Group();
+-    const kick = new THREE.Mesh(geo, matBase.clone());
+-    kick.userData.role = 'kick';
+-    cluster.add(kick);
+-
+-    const snares = [];
+-    const SN_DIST = 5.0;
+-    const snOffsets = [
+-      new THREE.Vector3(+SN_DIST, 0, 0),
+-      new THREE.Vector3(-SN_DIST, 0, 0),
+-      new THREE.Vector3(0, +SN_DIST, 0),
+-      new THREE.Vector3(0, -SN_DIST, 0),
+-      new THREE.Vector3(0, 0, +SN_DIST),
+-      new THREE.Vector3(0, 0, -SN_DIST)
+-    ];
+-    for (const o of snOffsets) {
+-      const s = new THREE.Mesh(geo, matBase.clone());
+-      s.position.copy(o);
+-      s.scale.setScalar(0.6);
+-      s.userData.role = 'snare';
+-      cluster.add(s);
+-      snares.push(s);
+-    }
+-
+-    const hats = [];
+-    const AXIAL = 0.5, SPREAD = 0.5;
+-    const tmp = new THREE.Vector3(), d = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3();
+-    const worldUp = new THREE.Vector3(0, 1, 0);
+-    const makeHat = (pos, scale = 0.25) => {
+-      const h = new THREE.Mesh(geo, matBase.clone());
+-      h.position.copy(pos);
+-      h.scale.setScalar(scale);
+-      h.userData.role = 'hat';
+-      cluster.add(h);
+-      hats.push(h);
+-    };
+-    for (const s of snares) {
+-      d.copy(s.position).normalize();
+-      u.copy(Math.abs(d.dot(worldUp)) > 0.9 ? new THREE.Vector3(1, 0, 0) : worldUp)
+-        .cross(d).normalize();
+-      v.copy(d).cross(u).normalize();
+-      tmp.copy(s.position).addScaledVector(d, AXIAL); makeHat(tmp);
+-      tmp.copy(s.position).addScaledVector(u, SPREAD); makeHat(tmp);
+-      tmp.copy(s.position).addScaledVector(u, -SPREAD); makeHat(tmp);
+-      tmp.copy(s.position).addScaledVector(v, SPREAD); makeHat(tmp);
+-      tmp.copy(s.position).addScaledVector(v, -SPREAD); makeHat(tmp);
+-    }
+-    cluster.userData = { kick, snares, hats };
+-    return cluster;
+-  }
+-
+-  _rehydrateClusterUserData(group) {
+-    let kick = null; const snares = []; const hats = [];
+-    group.traverse((o) => {
+-      if (!o.isMesh) return;
+-      const role = o.userData?.role;
+-      if (role === 'kick') kick = o;
+-      else if (role === 'snare') snares.push(o);
+-      else if (role === 'hat') hats.push(o);
+-    });
+-    group.userData = { kick, snares, hats };
+-  }
+-
+-  _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
+-    if (depth <= 0) return;
+-    const dirs = [
+-      new THREE.Vector3(+1, 0, 0),
+-      new THREE.Vector3(-1, 0, 0),
+-      new THREE.Vector3(0, +1, 0),
+-      new THREE.Vector3(0, -1, 0),
+-      new THREE.Vector3(0, 0, +1),
+-      new THREE.Vector3(0, 0, -1)
+-    ];
+-    for (const dir of dirs) {
+-      const clone = baseCluster.clone(true);
+-      this._rehydrateClusterUserData(clone);
+-      const scale = Math.pow(scaleDecay, (4 - depth));
+-      clone.scale.setScalar(scale);
+-      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
+-      parent.add(clone);
+-      this.fractalLayers.push(clone);
+-      this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
+-    }
+-  }
+-
+-  // ======================================================
+-  // 🔄 Update — rotation, symmetry, energy mapping
+-  // ======================================================
+-  update(_, dt = 0.016, renderer = null, scene = null, camera = null) {
++  _rehydrateClusterUserData(group) {
++    let kick = null; const snares = []; const hats = [];
++    group.traverse((o) => {
++      if (!o.isMesh) return;
++      const role = o.userData?.role;
++      if (role === 'kick') kick = o;
++      else if (role === 'snare') snares.push(o);
++      else if (role === 'hat') hats.push(o);
++    });
++    group.userData = { kick, snares, hats };
++  }
++
++  _shareResources(group) {
++    group.traverse((o) => {
++      if (!o.isMesh) return;
++      o.geometry = this._sharedGeo;
++      const role = o.userData?.role;
++      if (role && this._sharedMaterials[role]) {
++        o.material = this._sharedMaterials[role];
++      }
++    });
++  }
++
++  // ======================================================
++  // 🔄 Update — rotation, symmetry, energy mapping
++  // ======================================================
++  update(_, dt = 0.016, renderer = null, scene = null, camera = null) {
+     const soil = window.audio;
+     if (!soil?.hasStem('drums')) return;
+ 
+     const s = soil.stems['drums'];
+     s.ana.getByteFrequencyData(s.data);
+     const arr = s.data, len = arr.length, nyq = soil.ctx.sampleRate / 2;
+ 
+     // band helper (order-insensitive)
+     const band = (lo, hi) => {
+       const a = Math.max(0, Math.min(lo, hi));
+       const b = Math.max(0, Math.max(lo, hi));
+       const i1 = Math.floor((a / nyq) * len);
+       const i2 = Math.floor((b / nyq) * len);
+       if (i2 <= i1) return 0;
+       let sum = 0;
+       for (let i = i1; i < i2; i++) sum += arr[i];
+       return (sum / Math.max(1, i2 - i1)) / 255;
+     };
+ 
+     const ps = this.params;
+ 
+     const kick = band(ps.kickBandLow,  ps.kickBandHigh);
+     const snare = band(ps.snareBandLow, ps.snareBandHigh);
+     const hat = band(ps.hatBandLow,    ps.hatBandHigh);
+ 
+@@ -458,95 +402,96 @@ export class Drums {
+         h.material.emissive.copy(hatCol);
+       }
+     }
+ 
+     if (this._hasTrails && renderer && scene && camera) this._composer.render();
+   }
+ 
+   // ===== Utils =====
+   _clampTrail(v) { return THREE.MathUtils.clamp(v, 0, 0.999); }
+ 
+   // ======================================================
+   // (unchanged) helpers
+   // ======================================================
+   _rehydrateClusterUserData(group) {
+     let kick = null; const snares = []; const hats = [];
+     group.traverse((o) => {
+       if (!o.isMesh) return;
+       const role = o.userData?.role;
+       if (role === 'kick') kick = o;
+       else if (role === 'snare') snares.push(o);
+       else if (role === 'hat') hats.push(o);
+     });
+     group.userData = { kick, snares, hats };
+   }
+ 
+-  _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
+-    if (depth <= 0) return;
+-    const dirs = [
+-      new THREE.Vector3(+1, 0, 0), new THREE.Vector3(-1, 0, 0),
+-      new THREE.Vector3(0, +1, 0), new THREE.Vector3(0, -1, 0),
+-      new THREE.Vector3(0, 0, +1), new THREE.Vector3(0, 0, -1)
+-    ];
+-    for (const dir of dirs) {
+-      const clone = baseCluster.clone(true);
+-      this._rehydrateClusterUserData(clone);
+-      const scale = Math.pow(scaleDecay, (4 - depth));
+-      clone.scale.setScalar(scale);
+-      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
+-      parent.add(clone);
++  _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
++    if (depth <= 0) return;
++    const dirs = [
++      new THREE.Vector3(+1, 0, 0), new THREE.Vector3(-1, 0, 0),
++      new THREE.Vector3(0, +1, 0), new THREE.Vector3(0, -1, 0),
++      new THREE.Vector3(0, 0, +1), new THREE.Vector3(0, 0, -1)
++    ];
++    for (const dir of dirs) {
++      const clone = baseCluster.clone(true);
++      this._shareResources(clone);
++      this._rehydrateClusterUserData(clone);
++      const scale = Math.pow(scaleDecay, (4 - depth));
++      clone.scale.setScalar(scale);
++      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
++      parent.add(clone);
+       this.fractalLayers.push(clone);
+       this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
+     }
+   }
+ 
+-  _createDrumCluster(geo, matBase) {
+-    const cluster = new THREE.Group();
+-    const kick = new THREE.Mesh(geo, matBase.clone());
+-    kick.userData.role = 'kick';
+-    cluster.add(kick);
+-
+-    const snares = [];
+-    const SN_DIST = 5.0;
++  _createDrumCluster(geo, mats) {
++    const cluster = new THREE.Group();
++    const kick = new THREE.Mesh(geo, mats.kick);
++    kick.userData.role = 'kick';
++    cluster.add(kick);
++
++    const snares = [];
++    const SN_DIST = 5.0;
+     const snOffsets = [
+       new THREE.Vector3(+SN_DIST, 0, 0),
+       new THREE.Vector3(-SN_DIST, 0, 0),
+       new THREE.Vector3(0, +SN_DIST, 0),
+       new THREE.Vector3(0, -SN_DIST, 0),
+       new THREE.Vector3(0, 0, +SN_DIST),
+       new THREE.Vector3(0, 0, -SN_DIST)
+     ];
+-    for (const o of snOffsets) {
+-      const s = new THREE.Mesh(geo, matBase.clone());
+-      s.position.copy(o);
+-      s.scale.setScalar(0.6);
+-      s.userData.role = 'snare';
+-      cluster.add(s);
+-      snares.push(s);
++    for (const o of snOffsets) {
++      const s = new THREE.Mesh(geo, mats.snare);
++      s.position.copy(o);
++      s.scale.setScalar(0.6);
++      s.userData.role = 'snare';
++      cluster.add(s);
++      snares.push(s);
+     }
+ 
+     const hats = [];
+     const AXIAL = 0.5, SPREAD = 0.5;
+     const tmp = new THREE.Vector3(), d = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3();
+     const worldUp = new THREE.Vector3(0, 1, 0);
+-    const makeHat = (pos, scale = 0.25) => {
+-      const h = new THREE.Mesh(geo, matBase.clone());
+-      h.position.copy(pos);
+-      h.scale.setScalar(scale);
+-      h.userData.role = 'hat';
+-      cluster.add(h);
+-      hats.push(h);
++    const makeHat = (pos, scale = 0.25) => {
++      const h = new THREE.Mesh(geo, mats.hat);
++      h.position.copy(pos);
++      h.scale.setScalar(scale);
++      h.userData.role = 'hat';
++      cluster.add(h);
++      hats.push(h);
+     };
+     for (const s of snares) {
+       d.copy(s.position).normalize();
+       u.copy(Math.abs(d.dot(worldUp)) > 0.9 ? new THREE.Vector3(1, 0, 0) : worldUp).cross(d).normalize();
+       v.copy(d).cross(u).normalize();
+       makeHat(tmp.copy(s.position).addScaledVector(d, AXIAL));
+       makeHat(tmp.copy(s.position).addScaledVector(u, SPREAD));
+       makeHat(tmp.copy(s.position).addScaledVector(u, -SPREAD));
+       makeHat(tmp.copy(s.position).addScaledVector(v, SPREAD));
+       makeHat(tmp.copy(s.position).addScaledVector(v, -SPREAD));
+     }
+     cluster.userData = { kick, snares, hats };
+     return cluster;
+   }
+ }
