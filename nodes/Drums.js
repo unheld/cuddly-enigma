@@ -1,8 +1,8 @@
 // ======================================================
-// 🥁 Drums.js — v3.0.1 “Syntax Fix + Stability”
+// 🥁 Drums.js — v3.0.2 “Debounced Fractal Rebuild”
 // ------------------------------------------------------
-// - Fix: Unexpected identifier 'afterimageDamp' (missing comma/dup key)
-// - Removes stray duplicates and small merge artifacts
+// - Fix: rebuildFractal() no longer runs on every slider tick
+// - Adds 300ms debounce + depth safety cap
 // - Keeps your debug UI, trails, and axis-mapped rotation
 // ======================================================
 
@@ -14,7 +14,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 export class Drums {
   constructor(scene = null, renderer = null, camera = null) {
     // ---------- Geometry / Material ----------
-    this._sharedGeo = new THREE.IcosahedronGeometry(0.7, 6);
+    this._sharedGeo = new THREE.IcosahedronGeometry(0.5, 1);
     const matBase = new THREE.MeshStandardMaterial({
       color: 0x000000,
       metalness: 1,
@@ -42,20 +42,20 @@ export class Drums {
 
     // ---------- Fractal copies ----------
     this.fractalLayers = [];
-    this._createFractalLayer(this.root, this.cluster, 2, 0.9, 0.1);
+    this._createFractalLayer(this.root, this.cluster, 2, 0.58, 0.1);
 
     // ---------- State ----------
     this._kickEnv = this._snareEnv = this._hatEnv = 0;
     this._rotAxis = new THREE.Vector3(0.6, 1.0, 0.4).normalize();
     this._rotAxisTarget = this._rotAxis.clone();
 
-    // ---------- Parameters (HUGE experimental ranges) ----------
+    // ---------- Parameters ----------
     this.params = {
       // Rotation
       kickSpinScale: 4.0,
       snareSpinScale: 6.0,
       hatSpinScale: 8.0,
-      axisLerp: 0.08,
+
       totalSpinScale: 0.2,
       randomTwistChance: 0.01,
 
@@ -83,7 +83,7 @@ export class Drums {
       hatBandLow: 7000,  hatBandHigh: 8000,
 
       // Trails
-      afterimageDamp: 0.8 // [-10..10] (clamped to [0..0.999] on use)
+      afterimageDamp: 0.4
     };
 
     // ---------- Trails ----------
@@ -177,10 +177,6 @@ export class Drums {
     const addSlider = (container, label, key, min, max, step = 0.01) => {
       const wrap = document.createElement('div');
       wrap.style.margin = '6px 0';
-      const row = document.createElement('div');
-      row.style.display = 'flex';
-      row.style.justifyContent = 'space-between';
-      row.style.alignItems = 'center';
 
       const text = document.createElement('label');
       text.textContent = label;
@@ -236,7 +232,7 @@ export class Drums {
     addSlider(rot, 'Kick Spin', 'kickSpinScale', -1000, 1000, 0.1);
     addSlider(rot, 'Snare Spin', 'snareSpinScale', -1000, 1000, 0.1);
     addSlider(rot, 'Hat Spin', 'hatSpinScale', -1000, 1000, 0.1);
-    addSlider(rot, 'Axis Lerp', 'axisLerp', -1, 1, 0.005);
+ 
     addSlider(rot, 'Spin Scale', 'totalSpinScale', -1000, 1000, 0.01);
     addSlider(rot, 'Twist Chance', 'randomTwistChance', -1, 1, 0.001);
 
@@ -272,40 +268,49 @@ export class Drums {
     const trl = makeSection('Trails');
     addSlider(trl, 'Trail Damp', 'afterimageDamp', -10, 10, 0.01);
 
-    // ---- Fractal parameters ----
-const frac = makeSection('Fractal');
-this.params.fractalDepth = 2;       // number of recursive layers
-this.params.fractalScale = 0.9;     // scale decay per layer
-this.params.fractalDist = 0.1;      // spacing multiplier
+    // ---- Fractal parameters (debounced rebuild) ----
+    const frac = makeSection('Fractal');
 
-addSlider(frac, 'Depth', 'fractalDepth', 0, 4, 1);
-addSlider(frac, 'Scale', 'fractalScale', 0.1, 1.5, 0.01);
-addSlider(frac, 'Distance', 'fractalDist', 0.05, 5.0, 0.05);
+    // Backing fields + defaults
+    this._fractalDepth = 2;   // layers
+    this._fractalScale = 0.58; // scale decay
+    this._fractalDist  = 0.1; // spacing
 
-// Live fractal update on change
-const rebuildFractal = () => {
-  // remove old layers
-  for (const f of this.fractalLayers) this.root.remove(f);
-  this.fractalLayers = [];
-  // rebuild new layers
-  this._createFractalLayer(
-    this.root,
-    this.cluster,
-    Math.floor(this.params.fractalDepth),
-    this.params.fractalScale,
-    this.params.fractalDist
-  );
-};
-['fractalDepth', 'fractalScale', 'fractalDist'].forEach(key => {
-  Object.defineProperty(this.params, key, {
-    set: (v) => {
-      this[`_${key}`] = v;
-      rebuildFractal();
-    },
-    get: () => this[`_${key}`]
-  });
-});
+    // Public params for UI
+    Object.defineProperty(this.params, 'fractalDepth', {
+      get: () => this._fractalDepth,
+      set: (v) => { this._fractalDepth = v; safeRebuildFractal(); }
+    });
+    Object.defineProperty(this.params, 'fractalScale', {
+      get: () => this._fractalScale,
+      set: (v) => { this._fractalScale = v; safeRebuildFractal(); }
+    });
+    Object.defineProperty(this.params, 'fractalDist', {
+      get: () => this._fractalDist,
+      set: (v) => { this._fractalDist = v; safeRebuildFractal(); }
+    });
 
+    addSlider(frac, 'Depth',    'fractalDepth', 0, 2,   1);
+    addSlider(frac, 'Scale',    'fractalScale', -10, 10, 0.01);
+    addSlider(frac, 'Distance', 'fractalDist',  -10, 10, 0.01);
+
+    let rebuildTimeout = null;
+    const safeRebuildFractal = () => {
+      clearTimeout(rebuildTimeout);
+      rebuildTimeout = setTimeout(() => {
+        // remove old layers
+        for (const f of this.fractalLayers) this.root.remove(f);
+        this.fractalLayers = [];
+        // rebuild (with depth cap)
+        this._createFractalLayer(
+          this.root,
+          this.cluster,
+          Math.min(Math.floor(this._fractalDepth), 4),
+          this._fractalScale,
+          this._fractalDist
+        );
+      }, .1); // debounce window
+    };
 
     // collapse/expand all
     collapseAllBtn.onclick = () => {
@@ -348,7 +353,7 @@ const rebuildFractal = () => {
     const snare = band(ps.snareBandLow, ps.snareBandHigh);
     const hat   = band(ps.hatBandLow,   ps.hatBandHigh);
 
-    // envelopes (per band), attack/release clamped >=0
+    // envelopes
     const smooth = (v, t, atk, rel) => {
       const A = Math.max(0, atk), R = Math.max(0, rel);
       return v + (t - v) * (t > v ? A : R) * dt;
@@ -357,7 +362,7 @@ const rebuildFractal = () => {
     this._snareEnv = smooth(this._snareEnv, snare, ps.attackSnare, ps.releaseSnare);
     this._hatEnv   = smooth(this._hatEnv,   hat,   ps.attackHat,   ps.releaseHat);
 
-    // --- Axis-mapped rotation ---
+    // Axis-mapped rotation
     const kickSpin  = this._kickEnv  * ps.kickSpinScale;
     const snareSpin = this._snareEnv * ps.snareSpinScale;
     const hatSpin   = this._hatEnv   * ps.hatSpinScale;
@@ -367,18 +372,16 @@ const rebuildFractal = () => {
       .addScaledVector(new THREE.Vector3(0, 1, 0), snareSpin)
       .addScaledVector(new THREE.Vector3(0, 0, 1), hatSpin);
 
-    // avoid NaN when all spins are 0
     if (combinedAxis.lengthSq() > 1e-8) combinedAxis.normalize();
     else combinedAxis.set(0, 1, 0);
 
     const totalSpin = (kickSpin + snareSpin + hatSpin) * ps.totalSpinScale;
 
-    // clamp risky params at use
-    const safeLerp = Math.max(0, ps.axisLerp);
+
     const twistP   = THREE.MathUtils.clamp(ps.randomTwistChance, 0, 1);
 
     this._rotAxisTarget.copy(combinedAxis);
-    this._rotAxis.lerp(this._rotAxisTarget, safeLerp);
+   
 
     const quat = new THREE.Quaternion().setFromAxisAngle(this._rotAxis, totalSpin * dt);
     this.root.quaternion.multiplyQuaternions(quat, this.root.quaternion);
@@ -393,7 +396,7 @@ const rebuildFractal = () => {
       ).normalize();
     }
 
-    // --- Visuals (scale + emissive with clamps) ---
+    // Visuals (scale + emissive)
     const kScale = Math.max(0.01, ps.kickScaleBase  + this._kickEnv  * ps.kickScaleMult);
     const sScale = Math.max(0.01, ps.snareScaleBase + this._snareEnv * ps.snareScaleMult);
     const hScale = Math.max(0.01, ps.hatScaleBase   + this._hatEnv   * ps.hatScaleMult);
@@ -424,7 +427,6 @@ const rebuildFractal = () => {
       }
     }
 
-    // Trails render
     if (this._hasTrails && renderer && scene && camera) this._composer.render();
   }
 

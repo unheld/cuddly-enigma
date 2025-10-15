@@ -1,9 +1,10 @@
 // ======================================================
-// 🌌 VisualSoil3D.js — GLYPH v1.4 “Visible God-Glow”
+// 🌌 VisualSoil3D.js — GLYPH v1.5 “Rainbow Nave Lightspace”
 // ------------------------------------------------------
-// - Strong additive volumetric glow (no CORS)
-// - Reacts to global audio energy
-// - Tuned bloom + additive overlay pass
+// - Uses nave.hdr as environment map
+// - Adds rainbow spectrum fade across all lights
+// - Lights pulse gently with global audio energy
+// - Keeps additive volumetric glow + bloom
 // ======================================================
 
 import * as THREE from 'three';
@@ -31,7 +32,7 @@ export class VisualSoil3D {
     this.scene.background = new THREE.Color(0x000000);
     this.scene.fog = new THREE.FogExp2(0x000010, 0.04);
     this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
-    this.camera.position.set(0, 0, 8);
+    this.camera.position.set(0, 0, 0);
 
     // ---------- Components ----------
     this._initLighting();
@@ -44,32 +45,79 @@ export class VisualSoil3D {
     window.addEventListener('resize', () => this.resize());
     this.resize();
 
-    console.log('%c[3D Soil] v1.4 Visible God-Glow ready', 'color:#0ff');
+    console.log('%c[3D Soil] v1.5 Rainbow Nave Lightspace ready', 'color:#0ff');
   }
 
+  // ======================================================
+  // 🌈 LIGHTING — Rainbow Hue Shift + Pulse
+  // ======================================================
   _initLighting() {
-    this.keyLight = new THREE.PointLight(0xff66ff, 100, 40, 2.5);
+    // --- Primary lights ---
+    this.keyLight = new THREE.PointLight(0xffffff, 80, 40, 2.5);
     this.keyLight.position.set(0, 0, 0);
     this.scene.add(this.keyLight);
 
-    const rim = new THREE.DirectionalLight(0x66ccff, 0.4);
-    rim.position.set(3, 2, 5);
-    this.scene.add(rim);
+    this.rimLight = new THREE.DirectionalLight(0xffffff, 0.35);
+    this.rimLight.position.set(3, 2, 5);
+    this.scene.add(this.rimLight);
 
-    const ambient = new THREE.HemisphereLight(0x3344ff, 0x110022, 0.35);
-    this.scene.add(ambient);
+    this.ambientLight = new THREE.HemisphereLight(0xffffff, 0x111122, 0.3);
+    this.scene.add(this.ambientLight);
+
+    // --- Animation state ---
+    this._lightCtl = {
+      hue: 0,               // hue in degrees
+      hueSpeed: 10,         // how fast the hue rotates per second
+      pulsePhase: 0,        // sine phase
+      pulseSpeed: .10,      // speed of pulsing
+      audioReactive: true,  // link to global audio energy
+      keyBase: 0, keyRange: 360000,
+      rimBase: 0, rimRange: 360000,
+      ambBase: 0, ambRange: 360000
+    };
   }
 
+  _updateLighting(dt = 0.016, energies) {
+    const L = this._lightCtl;
+    if (!L) return;
+
+    L.hue = (L.hue + L.hueSpeed * dt) % 360;
+    L.pulsePhase += Math.PI * 2 * L.pulseSpeed * dt;
+
+    const pulse = (Math.sin(L.pulsePhase) + 1) * 0.5; // 0..1
+    const energy = L.audioReactive ? (0.6 + (energies?.global ?? 0) * 1.0) : 1.0;
+
+    const hKey = L.hue / 360;
+    const hRim = ((L.hue + 120) % 360) / 360;
+    const hAmb = ((L.hue + 240) % 360) / 360;
+
+    this.keyLight.color.setHSL(hKey, 1.0, 0.6);
+    this.rimLight.color.setHSL(hRim, 1.0, 0.5);
+    this.ambientLight.color.setHSL(hAmb, 0.8, 0.6);
+    this.ambientLight.groundColor.setHSL(hAmb, 0.6, 0.25);
+
+    this.keyLight.intensity = (L.keyBase + L.keyRange * pulse) * energy;
+    this.rimLight.intensity = (L.rimBase + L.rimRange * pulse) * energy;
+    this.ambientLight.intensity = (L.ambBase + L.ambRange * pulse) * energy;
+  }
+
+  // ======================================================
+  // 🌁 ENVIRONMENT — Load nave.hdr locally
+  // ======================================================
   _initEnvironment() {
-    const hdrURL = 'https://threejs.org/examples/textures/equirectangular/royal_esplanade_1k.hdr';
+    const hdrURL = './new.hdr'; // local file in GLYPH folder
     new RGBELoader().load(hdrURL, (hdrTex) => {
       hdrTex.mapping = THREE.EquirectangularReflectionMapping;
       this.scene.environment = hdrTex;
+      this.scene.background = hdrTex; // visible background
+      console.log('%cLoaded hdr successfully', 'color:#ff6');
+    }, undefined, (err) => {
+      console.warn('HDR load error:', err);
     });
   }
 
   _addDustParticles() {
-    const count = 2000;
+    const count = 200;
     const pos = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
       pos[i * 3 + 0] = (Math.random() - 0.5) * 50;
@@ -90,22 +138,16 @@ export class VisualSoil3D {
     this.scene.add(this.dust);
   }
 
-  // ------------------------------------------------------
-  // 🌞 Post FX — Bloom + Additive Glow Overlay
-  // ------------------------------------------------------
   _initPostFX() {
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
 
     const bloom = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      1.0,
-      0.5,
-      0.85
+      1.0, 0.5, 0.85
     );
     this.composer.addPass(bloom);
 
-    // Custom additive full-screen glow shader
     const mat = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },
@@ -125,7 +167,6 @@ export class VisualSoil3D {
         uniform float time;
         uniform float beat;
         uniform float intensity;
-
         void main(){
           vec4 base = texture2D(tDiffuse, vUv);
           float d = distance(vUv, vec2(0.5));
@@ -158,9 +199,14 @@ export class VisualSoil3D {
     this.nodes.push(node);
   }
 
+  // ======================================================
+  // 🔁 Frame Update — global sync
+  // ======================================================
   update(energies, dt = 0.016) {
     const t = performance.now() * 0.001;
-    const globalEnergy = energies?.global ?? 0; // 🔊 drive brightness
+    const globalEnergy = energies?.global ?? 0;
+
+    this._updateLighting(dt, energies);
 
     let usedComposer = false;
     for (const node of this.nodes) {
@@ -177,7 +223,6 @@ export class VisualSoil3D {
       }
     }
 
-    // Dust shimmer
     if (this.dust) {
       this.dust.rotation.y += dt * 0.05;
       const pos = this.dust.geometry.attributes.position.array;
@@ -187,18 +232,15 @@ export class VisualSoil3D {
       this.dust.geometry.attributes.position.needsUpdate = true;
     }
 
-    // Camera drift
-    this.camera.position.x = Math.sin(t * 0.015) * 4;
-    this.camera.position.y = Math.sin(t * 0.09) * 10.5;
-    this.camera.position.z = 8 + Math.cos(t * 0.2) * 10.5;
+    this.camera.position.x = Math.sin(t * 0.05) * 10; // left-right
+    this.camera.position.y = Math.sin(t * 2.09) * 0; // up-down
+    this.camera.position.z = Math.cos(t * 0.05) * 10; // in-out
     this.camera.lookAt(0, 0, 0);
 
-    // Render main scene with bloom
     if (!usedComposer && this.composer) this.composer.render();
 
-    // --- Add strong volumetric glow overlay ---
     this._glow.mat.uniforms.time.value = t;
-    this._glow.mat.uniforms.beat.value = globalEnergy * 1.2; // beat pulse
+    this._glow.mat.uniforms.beat.value = globalEnergy * 1.2;
     this.renderer.autoClear = false;
     this.renderer.render(this._glow.scene, this._glow.cam);
     this.renderer.autoClear = true;
