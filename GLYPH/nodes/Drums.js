@@ -16,7 +16,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 export class Drums {
   constructor(scene = null, renderer = null, camera = null) {
     // ---------- Geometry / Material ----------
-    const geo = new THREE.IcosahedronGeometry(0.7, 10);
+    this._sharedGeo = new THREE.IcosahedronGeometry(0.7, 6);
     const matBase = new THREE.MeshStandardMaterial({
       color: 0x000000,
       metalness: 1,
@@ -29,14 +29,44 @@ export class Drums {
       blending: THREE.NormalBlending
     });
 
+    this._sharedMaterials = {
+      kick: matBase,
+      snare: matBase.clone(),
+      hat: matBase.clone()
+    };
+
     this.root = new THREE.Group();
     scene?.add(this.root);
 
-    this.cluster = this._createDrumCluster(geo, matBase);
+    this.cluster = this._createDrumCluster(this._sharedGeo, this._sharedMaterials);
+    this._shareResources(this.cluster);
     this.root.add(this.cluster);
+
+    // ---------- Shared scratch values ----------
+    this._combinedAxis = new THREE.Vector3();
+    this._axisX = new THREE.Vector3(1, 0, 0);
+    this._axisY = new THREE.Vector3(0, 1, 0);
+    this._axisZ = new THREE.Vector3(0, 0, 1);
+    this._quat = new THREE.Quaternion();
+    this._twistOffset = new THREE.Vector3();
+    this._kickColor = new THREE.Color();
+    this._snareColor = new THREE.Color();
+    this._hatColor = new THREE.Color();
+    this._trailSize = new THREE.Vector2();
+    this._trailRenderer = null;
+    this._fractalDirections = [
+      new THREE.Vector3(+1, 0, 0),
+      new THREE.Vector3(-1, 0, 0),
+      new THREE.Vector3(0, +1, 0),
+      new THREE.Vector3(0, -1, 0),
+      new THREE.Vector3(0, 0, +1),
+      new THREE.Vector3(0, 0, -1)
+    ];
+    this._fractalDirScratch = new THREE.Vector3();
 
     // ---------- Fractal copies ----------
     this.fractalLayers = [];
+    this._allClusters = [this.cluster];
     this._createFractalLayer(this.root, this.cluster, 2, 0.8, 1.5);
 
     // ---------- State ----------
@@ -78,7 +108,8 @@ export class Drums {
       hatBandLow: 7000,  hatBandHigh: 8000,     // [0..20000]
 
       // Trails
-      afterimageDamp: 0.8           // [-10..10] (clamped to [0..0.999])
+      afterimageDamp: 0.8,          // [-10..10] (clamped to [0..0.999])
+      trailResolutionScale: 0.5     // [0.1..1] (downscales FBO resolution)
     };
 
     // ---------- Trails ----------
@@ -92,12 +123,14 @@ export class Drums {
   // 🌠 Trail persistence compositor
   // ======================================================
   _setupTrails(renderer, scene, camera) {
+    this._trailRenderer = renderer;
     this._composer = new EffectComposer(renderer);
     this._composer.addPass(new RenderPass(scene, camera));
     this._afterimage = new AfterimagePass();
     this._afterimage.uniforms['damp'].value = this._clampTrail(this.params.afterimageDamp);
     this._composer.addPass(this._afterimage);
     this._hasTrails = true;
+    this._updateTrailResolution();
   }
 
   // ======================================================
@@ -192,15 +225,20 @@ export class Drums {
 
       // Sync functions
       const apply = (v) => {
-        const num = parseFloat(v);
+        let num = parseFloat(v);
         if (!Number.isFinite(num)) return;
+        if (key === 'afterimageDamp') num = this._clampTrail(num);
+        else if (key === 'trailResolutionScale') num = this._clampTrailScale(num);
+
         this.params[key] = num;
         input.value = String(num);
         val.value = String(num);
 
         // live side-effects
         if (key === 'afterimageDamp' && this._afterimage) {
-          this._afterimage.uniforms['damp'].value = this._clampTrail(num);
+          this._afterimage.uniforms['damp'].value = num;
+        } else if (key === 'trailResolutionScale') {
+          this._updateTrailResolution();
         }
       };
 
@@ -254,6 +292,7 @@ export class Drums {
 
     const trl = makeSection('Trails');
     addSlider(trl, 'Trail Damp', 'afterimageDamp', -10, 10, 0.01);
+    addSlider(trl, 'Trail Res Scale', 'trailResolutionScale', 0.1, 1, 0.05);
 
     // collapse/expand all
     collapseAllBtn.onclick = () => {
@@ -269,58 +308,6 @@ export class Drums {
   // ======================================================
   // 🧩 Cluster / fractal helpers
   // ======================================================
-  _createDrumCluster(geo, matBase) {
-    const cluster = new THREE.Group();
-    const kick = new THREE.Mesh(geo, matBase.clone());
-    kick.userData.role = 'kick';
-    cluster.add(kick);
-
-    const snares = [];
-    const SN_DIST = 5.0;
-    const snOffsets = [
-      new THREE.Vector3(+SN_DIST, 0, 0),
-      new THREE.Vector3(-SN_DIST, 0, 0),
-      new THREE.Vector3(0, +SN_DIST, 0),
-      new THREE.Vector3(0, -SN_DIST, 0),
-      new THREE.Vector3(0, 0, +SN_DIST),
-      new THREE.Vector3(0, 0, -SN_DIST)
-    ];
-    for (const o of snOffsets) {
-      const s = new THREE.Mesh(geo, matBase.clone());
-      s.position.copy(o);
-      s.scale.setScalar(0.6);
-      s.userData.role = 'snare';
-      cluster.add(s);
-      snares.push(s);
-    }
-
-    const hats = [];
-    const AXIAL = 0.5, SPREAD = 0.5;
-    const tmp = new THREE.Vector3(), d = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3();
-    const worldUp = new THREE.Vector3(0, 1, 0);
-    const makeHat = (pos, scale = 0.25) => {
-      const h = new THREE.Mesh(geo, matBase.clone());
-      h.position.copy(pos);
-      h.scale.setScalar(scale);
-      h.userData.role = 'hat';
-      cluster.add(h);
-      hats.push(h);
-    };
-    for (const s of snares) {
-      d.copy(s.position).normalize();
-      u.copy(Math.abs(d.dot(worldUp)) > 0.9 ? new THREE.Vector3(1, 0, 0) : worldUp)
-        .cross(d).normalize();
-      v.copy(d).cross(u).normalize();
-      tmp.copy(s.position).addScaledVector(d, AXIAL); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(u, SPREAD); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(u, -SPREAD); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(v, SPREAD); makeHat(tmp);
-      tmp.copy(s.position).addScaledVector(v, -SPREAD); makeHat(tmp);
-    }
-    cluster.userData = { kick, snares, hats };
-    return cluster;
-  }
-
   _rehydrateClusterUserData(group) {
     let kick = null; const snares = []; const hats = [];
     group.traverse((o) => {
@@ -333,26 +320,15 @@ export class Drums {
     group.userData = { kick, snares, hats };
   }
 
-  _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
-    if (depth <= 0) return;
-    const dirs = [
-      new THREE.Vector3(+1, 0, 0),
-      new THREE.Vector3(-1, 0, 0),
-      new THREE.Vector3(0, +1, 0),
-      new THREE.Vector3(0, -1, 0),
-      new THREE.Vector3(0, 0, +1),
-      new THREE.Vector3(0, 0, -1)
-    ];
-    for (const dir of dirs) {
-      const clone = baseCluster.clone(true);
-      this._rehydrateClusterUserData(clone);
-      const scale = Math.pow(scaleDecay, (4 - depth));
-      clone.scale.setScalar(scale);
-      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
-      parent.add(clone);
-      this.fractalLayers.push(clone);
-      this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
-    }
+  _shareResources(group) {
+    group.traverse((o) => {
+      if (!o.isMesh) return;
+      o.geometry = this._sharedGeo;
+      const role = o.userData?.role;
+      if (role && this._sharedMaterials[role]) {
+        o.material = this._sharedMaterials[role];
+      }
+    });
   }
 
   // ======================================================
@@ -398,10 +374,10 @@ export class Drums {
     const snareSpin = this._snareEnv * ps.snareSpinScale;
     const hatSpin   = this._hatEnv   * ps.hatSpinScale;
 
-    const combinedAxis = new THREE.Vector3()
-      .addScaledVector(new THREE.Vector3(1, 0, 0), kickSpin)
-      .addScaledVector(new THREE.Vector3(0, 1, 0), snareSpin)
-      .addScaledVector(new THREE.Vector3(0, 0, 1), hatSpin);
+    const combinedAxis = this._combinedAxis;
+    combinedAxis.copy(this._axisX).multiplyScalar(kickSpin);
+    combinedAxis.addScaledVector(this._axisY, snareSpin);
+    combinedAxis.addScaledVector(this._axisZ, hatSpin);
 
     // avoid NaN when all spins are 0
     if (combinedAxis.lengthSq() > 1e-8) combinedAxis.normalize(); else combinedAxis.set(0,1,0);
@@ -415,17 +391,16 @@ export class Drums {
     this._rotAxisTarget.copy(combinedAxis);
     this._rotAxis.lerp(this._rotAxisTarget, safeLerp);
 
-    const quat = new THREE.Quaternion().setFromAxisAngle(this._rotAxis, totalSpin * dt);
+    const quat = this._quat.setFromAxisAngle(this._rotAxis, totalSpin * dt);
     this.root.quaternion.multiplyQuaternions(quat, this.root.quaternion);
 
     if (Math.random() < twistP && Math.abs(totalSpin) > 0.02) {
-      this._rotAxisTarget.add(
-        new THREE.Vector3(
-          (Math.random() - 0.5) * 0.4,
-          (Math.random() - 0.5) * 0.4,
-          (Math.random() - 0.5) * 0.4
-        )
-      ).normalize();
+      this._twistOffset.set(
+        (Math.random() - 0.5) * 0.4,
+        (Math.random() - 0.5) * 0.4,
+        (Math.random() - 0.5) * 0.4
+      );
+      this._rotAxisTarget.add(this._twistOffset).normalize();
     }
 
     // --- Visuals (scale + emissive with clamps) ---
@@ -437,12 +412,11 @@ export class Drums {
     const sEm = Math.max(0, this._snareEnv * ps.snareEmissiveMult);
     const hEm = Math.max(0, this._hatEnv   * ps.hatEmissiveMult);
 
-    const kickCol  = new THREE.Color(0xff0000).multiplyScalar(kEm);
-    const snareCol = new THREE.Color(0x0088ff).multiplyScalar(sEm);
-    const hatCol   = new THREE.Color(0x00ff88).multiplyScalar(hEm);
+    const kickCol = this._kickColor.set(0xff0000).multiplyScalar(kEm);
+    const snareCol = this._snareColor.set(0x0088ff).multiplyScalar(sEm);
+    const hatCol = this._hatColor.set(0x00ff88).multiplyScalar(hEm);
 
-    const allClusters = [this.cluster, ...this.fractalLayers];
-    for (const c of allClusters) {
+    for (const c of this._allClusters) {
       const ud = c.userData;
       if (!ud || !ud.kick) continue;
 
@@ -465,43 +439,42 @@ export class Drums {
   // ===== Utils =====
   _clampTrail(v) { return THREE.MathUtils.clamp(v, 0, 0.999); }
 
-  // ======================================================
-  // (unchanged) helpers
-  // ======================================================
-  _rehydrateClusterUserData(group) {
-    let kick = null; const snares = []; const hats = [];
-    group.traverse((o) => {
-      if (!o.isMesh) return;
-      const role = o.userData?.role;
-      if (role === 'kick') kick = o;
-      else if (role === 'snare') snares.push(o);
-      else if (role === 'hat') hats.push(o);
-    });
-    group.userData = { kick, snares, hats };
+  _clampTrailScale(v) { return THREE.MathUtils.clamp(v, 0.1, 1); }
+
+  _updateTrailResolution() {
+    if (!this._composer || !this._trailRenderer) return;
+    const scale = this._clampTrailScale(this.params.trailResolutionScale ?? 1);
+    const renderer = this._trailRenderer;
+    renderer.getSize(this._trailSize);
+    const pixelRatio = renderer.getPixelRatio() * scale;
+    this._composer.setPixelRatio(pixelRatio);
+    this._composer.setSize(this._trailSize.x, this._trailSize.y);
   }
 
+
+  // ======================================================
+  // 🧮 Fractal replication
+  // ======================================================
   _createFractalLayer(parent, baseCluster, depth, scaleDecay, dist) {
     if (depth <= 0) return;
-    const dirs = [
-      new THREE.Vector3(+1, 0, 0), new THREE.Vector3(-1, 0, 0),
-      new THREE.Vector3(0, +1, 0), new THREE.Vector3(0, -1, 0),
-      new THREE.Vector3(0, 0, +1), new THREE.Vector3(0, 0, -1)
-    ];
-    for (const dir of dirs) {
+    for (const dir of this._fractalDirections) {
       const clone = baseCluster.clone(true);
+      this._shareResources(clone);
       this._rehydrateClusterUserData(clone);
       const scale = Math.pow(scaleDecay, (4 - depth));
       clone.scale.setScalar(scale);
-      clone.position.copy(dir.clone().multiplyScalar(dist * (4 - depth)));
+      this._fractalDirScratch.copy(dir).multiplyScalar(dist * (4 - depth));
+      clone.position.copy(this._fractalDirScratch);
       parent.add(clone);
       this.fractalLayers.push(clone);
+      this._allClusters.push(clone);
       this._createFractalLayer(clone, baseCluster, depth - 1, scaleDecay, dist * scaleDecay);
     }
   }
 
-  _createDrumCluster(geo, matBase) {
+  _createDrumCluster(geo, mats) {
     const cluster = new THREE.Group();
-    const kick = new THREE.Mesh(geo, matBase.clone());
+    const kick = new THREE.Mesh(geo, mats.kick);
     kick.userData.role = 'kick';
     cluster.add(kick);
 
@@ -516,7 +489,7 @@ export class Drums {
       new THREE.Vector3(0, 0, -SN_DIST)
     ];
     for (const o of snOffsets) {
-      const s = new THREE.Mesh(geo, matBase.clone());
+      const s = new THREE.Mesh(geo, mats.snare);
       s.position.copy(o);
       s.scale.setScalar(0.6);
       s.userData.role = 'snare';
@@ -529,7 +502,7 @@ export class Drums {
     const tmp = new THREE.Vector3(), d = new THREE.Vector3(), u = new THREE.Vector3(), v = new THREE.Vector3();
     const worldUp = new THREE.Vector3(0, 1, 0);
     const makeHat = (pos, scale = 0.25) => {
-      const h = new THREE.Mesh(geo, matBase.clone());
+      const h = new THREE.Mesh(geo, mats.hat);
       h.position.copy(pos);
       h.scale.setScalar(scale);
       h.userData.role = 'hat';
