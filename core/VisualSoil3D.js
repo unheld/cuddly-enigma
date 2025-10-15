@@ -16,15 +16,9 @@ export class VisualSoil3D {
   constructor(canvasSelector = '#gl3d') {
     // ---------- Renderer ----------
     this.canvas = document.querySelector(canvasSelector);
-    this.renderer = new THREE.WebGLRenderer({
-      canvas: this.canvas,
-      antialias: true,
-      alpha: false,
-      powerPreference: 'high-performance',
-      failIfMajorPerformanceCaveat: true
-    });
-    this.pixelRatio = this._getPixelRatio();
-    this.renderer.setPixelRatio(this.pixelRatio);
+    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+    const ratio = window.devicePixelRatio > 1.5 ? 1.25 : window.devicePixelRatio;
+    this.renderer.setPixelRatio(ratio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.outputEncoding = THREE.sRGBEncoding;
@@ -77,54 +71,18 @@ export class VisualSoil3D {
   _addDustParticles() {
     const count = 2000;
     const pos = new Float32Array(count * 3);
-    const phase = new Float32Array(count);
     for (let i = 0; i < count; i++) {
       pos[i * 3 + 0] = (Math.random() - 0.5) * 50;
       pos[i * 3 + 1] = (Math.random() - 0.5) * 50;
       pos[i * 3 + 2] = (Math.random() - 0.5) * 50;
-      phase[i] = Math.random() * Math.PI * 2;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('phase', new THREE.BufferAttribute(phase, 1));
-    this._dustUniforms = {
-      time: { value: 0 },
-      beat: { value: 0 },
-      tint: { value: new THREE.Color(0xffffff) },
-      size: { value: this._getDustSize() }
-    };
-    const mat = new THREE.ShaderMaterial({
-      uniforms: this._dustUniforms,
-      vertexShader: `
-        uniform float time;
-        uniform float beat;
-        uniform float size;
-        attribute float phase;
-        varying float vFade;
-        void main(){
-          vec3 displaced = position;
-          float offset = sin(time * 0.35 + phase) * 0.6;
-          displaced.y += offset;
-          displaced.x += sin(time * 0.15 + phase * 1.3) * 0.3;
-          displaced.z += cos(time * 0.2 + phase * 0.7) * 0.3;
-          float pulse = 0.7 + beat * 0.6;
-          vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
-          gl_Position = projectionMatrix * mvPosition;
-          gl_PointSize = size * pulse * (300.0 / max(1.0, -mvPosition.z));
-          vFade = 0.45 + 0.35 * sin(phase * 13.37);
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 tint;
-        varying float vFade;
-        void main(){
-          vec2 uv = gl_PointCoord.xy - 0.5;
-          float dist = length(uv);
-          float alpha = smoothstep(0.5, 0.0, dist) * vFade;
-          gl_FragColor = vec4(tint, alpha);
-        }
-      `,
+    const mat = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.03,
       transparent: true,
+      opacity: 0.45,
       blending: THREE.AdditiveBlending,
       depthWrite: false
     });
@@ -145,8 +103,6 @@ export class VisualSoil3D {
       0.5,
       0.85
     );
-    bloom.renderToScreen = false;
-    this._bloom = bloom;
     this.composer.addPass(bloom);
 
     // Custom additive full-screen glow shader
@@ -191,15 +147,10 @@ export class VisualSoil3D {
   }
 
   resize() {
-    this.pixelRatio = this._getPixelRatio();
-    this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.composer?.setSize(window.innerWidth, window.innerHeight);
-    if (this.composer?.setPixelRatio) this.composer.setPixelRatio(this.pixelRatio);
-    if (this._bloom?.setSize) this._bloom.setSize(window.innerWidth, window.innerHeight);
-    if (this._dustUniforms) this._dustUniforms.size.value = this._getDustSize();
   }
 
   addNode(node) {
@@ -229,10 +180,11 @@ export class VisualSoil3D {
     // Dust shimmer
     if (this.dust) {
       this.dust.rotation.y += dt * 0.05;
-      if (this._dustUniforms) {
-        this._dustUniforms.time.value = t;
-        this._dustUniforms.beat.value = globalEnergy;
+      const pos = this.dust.geometry.attributes.position.array;
+      for (let i = 0; i < pos.length; i += 3) {
+        pos[i + 1] += Math.sin(t + i * 0.03) * 0.0008;
       }
+      this.dust.geometry.attributes.position.needsUpdate = true;
     }
 
     // Camera drift
@@ -250,15 +202,5 @@ export class VisualSoil3D {
     this.renderer.autoClear = false;
     this.renderer.render(this._glow.scene, this._glow.cam);
     this.renderer.autoClear = true;
-  }
-
-  _getPixelRatio() {
-    const dpr = window.devicePixelRatio || 1;
-    return Math.min(1.75, dpr);
-  }
-
-  _getDustSize() {
-    const base = 4.5;
-    return base * (window.devicePixelRatio ? Math.min(window.devicePixelRatio, 2.0) : 1);
   }
 }
