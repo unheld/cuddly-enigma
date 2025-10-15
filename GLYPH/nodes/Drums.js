@@ -54,6 +54,9 @@ export class Drums {
     this._hatColor = new THREE.Color();
     this._trailSize = new THREE.Vector2();
     this._trailRenderer = null;
+    this._lastTrailWidth = 0;
+    this._lastTrailHeight = 0;
+    this._lastTrailPixelRatio = 0;
     this._fractalDirections = [
       new THREE.Vector3(+1, 0, 0),
       new THREE.Vector3(-1, 0, 0),
@@ -433,7 +436,13 @@ export class Drums {
       }
     }
 
-    if (this._hasTrails && renderer && scene && camera) this._composer.render();
+    if (this._hasTrails && renderer && scene && camera) {
+      if (renderer !== this._trailRenderer) {
+        this._trailRenderer = renderer;
+      }
+      this._ensureTrailResolutionSync(renderer);
+      this._composer.render();
+    }
   }
 
   // ===== Utils =====
@@ -446,9 +455,28 @@ export class Drums {
     const scale = this._clampTrailScale(this.params.trailResolutionScale ?? 1);
     const renderer = this._trailRenderer;
     renderer.getSize(this._trailSize);
-    const pixelRatio = renderer.getPixelRatio() * scale;
+    const basePixelRatio = renderer.getPixelRatio();
+    const pixelRatio = basePixelRatio * scale;
     this._composer.setPixelRatio(pixelRatio);
     this._composer.setSize(this._trailSize.x, this._trailSize.y);
+    this._lastTrailWidth = this._trailSize.x;
+    this._lastTrailHeight = this._trailSize.y;
+    this._lastTrailPixelRatio = basePixelRatio;
+  }
+
+  _ensureTrailResolutionSync(renderer) {
+    if (!renderer || renderer !== this._trailRenderer) return;
+    renderer.getSize(this._trailSize);
+    const width = this._trailSize.x;
+    const height = this._trailSize.y;
+    const pixelRatio = renderer.getPixelRatio();
+    if (
+      width !== this._lastTrailWidth ||
+      height !== this._lastTrailHeight ||
+      pixelRatio !== this._lastTrailPixelRatio
+    ) {
+      this._updateTrailResolution();
+    }
   }
 
 
