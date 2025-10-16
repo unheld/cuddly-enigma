@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MIDI Roll — 8-bit ASCII Edition</title>
+
+  <!-- ***********************
+       8-bit / ASCII UI styles
+       *********************** -->
+  <style>
+    :root{
+      /* 8-bit palette */
+      --bg: #0a0f14;
+      --panel: #0f1620;
+      --rail: #0c131c;
+      --edge: #1e2a3d;
+      --grid: #182535;
+      --grid-bold: #26374f;
+      --bar-a: #0c1522;
+      --bar-b: #0e1a2a;
+
+      --text: #cfe5ff;
+      --muted: #93a8c6;
+      --accent: #67a3ff;
+      --good: #6ee7b7;
+      --warn: #ffb86b;
+      --playhead: #ff5f6e;
+
+      --note: #7ce6c6;
+      --handle: #f8c34f;
+
+      --ascii: #7aa2ff;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    .app { display:grid; grid-template-rows:auto auto 1fr auto; height:100%; }
+
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--edge);
+      padding: 8px 12px;
+      display:flex; align-items:center; gap:12px;
+    }
+    header .ascii {
+      color: var(--ascii);
+      white-space: pre;
+      line-height: 1;
+      font-weight: 600;
+    }
+    header .spacer{flex:1}
+
+    /* ASCII-ish widgets */
+    .btn, .field, select, input[type="number"]{
+      background: var(--rail);
+      color: var(--text);
+      border: 1px solid var(--edge);
+      border-radius: 6px;
+      padding: 6px 10px;
+    }
+    .btn { cursor:pointer }
+    .btn.primary { background:#11213a; border-color:#2a4163 }
+    .btn:disabled { opacity:.55; cursor:not-allowed }
+
+    .controls {
+      display:grid; gap:8px 10px;
+      grid-template-columns: repeat(10, minmax(0,1fr));
+      padding:8px 12px; background:var(--rail); border-bottom:1px solid var(--edge);
+    }
+    .group { display:flex; align-items:center; gap:8px }
+    .group label { color:var(--muted) }
+
+    .workspace { display:grid; grid-template-columns: 120px 1fr; height:100% }
+    .pianokeys { background:var(--panel); border-right:1px solid var(--edge); overflow:auto }
+    .rollwrap { position:relative; overflow:auto; background:var(--panel) }
+
+    /* ASCII ruler strip */
+    .ruler {
+      position:sticky; top:0; left:0; height:22px;
+      background:#0b1524; color:#86a4d6; border-bottom:1px solid var(--edge);
+      display:flex; align-items:center; gap:0;
+      z-index:5;
+      font-size:11px;
+    }
+    .ruler .cell {
+      min-width: 64px; text-align:center; border-right:1px solid var(--grid-bold);
+    }
+
+    .legend { padding:8px 12px; background:var(--panel); border-top:1px solid var(--edge); color:var(--muted) }
+
+    /* Keys */
+    .key { height:20px; display:flex; align-items:center; justify-content:flex-end; padding-right:8px; color:#a1b9de }
+    .key.black { background:#0c1322; color:#7a91bb }
+
+    /* Grid + Notes (SVG) */
+    svg { display:block }
+    .bar-bg-a { fill: var(--bar-a) }
+    .bar-bg-b { fill: var(--bar-b) }
+    .row-scale { fill: #12315a66 }
+
+    .grid-line { stroke: var(--grid); stroke-width:1 }
+    .grid-line.bold { stroke: var(--grid-bold) }
+
+    .playhead { stroke: var(--playhead); stroke-width:2; filter: drop-shadow(0 0 6px #ff5f6e) }
+
+    .note { cursor: grab }
+    .note rect { fill: var(--note); opacity:.95; rx:3; ry:3 }
+    .note rect.sel { stroke: var(--warn); stroke-width:2; fill-opacity: .92 }
+    .handle { fill: var(--handle) }
+
+    /* Chord palette (ASCII chips) */
+    .sidebar { display:flex; gap:8px; padding:8px 12px; background:var(--rail); border-top:1px solid var(--edge); align-items:center; flex-wrap:wrap }
+    .chip { padding:4px 10px; border:1px solid var(--edge); border-radius:999px; background:#0f1729; color:#cfe5ff; cursor:grab; user-select:none }
+    .chip[data-ctype="M"]{background:#0b2546}
+    .chip[data-ctype="m"]{background:#3a0d1a}
+    .chip[data-ctype="7"]{background:#2a1f08}
+    .chip[data-ctype="M7"]{background:#0a2b22}
+    .chip[data-ctype="sus2"], .chip[data-ctype="sus4"]{background:#11263c}
+    .chip[data-ctype="dim"]{background:#231a3a}
+    .chip[data-ctype="aug"]{background:#3b1428}
+
+    .hint { color:#86aefc }
+
+    /* Lasso rectangle */
+    .lasso { fill:#7aa2ff22; stroke:#7aa2ff; stroke-dasharray:4 3; pointer-events:none }
+  </style>
+
+  <!-- Browser UMD build of MidiWriter (no require) -->
+  <script src="https://cdn.jsdelivr.net/npm/midi-writer-js@2.1.4/build/index.min.js"></script>
+</head>
+<body>
+<div class="app">
+  <header>
+    <pre class="ascii">┌─ MIDI ROLL ───────────────────────────────┐</pre>
+    <div class="spacer"></div>
+    <button id="btnPlay" class="btn primary">▶ PLAY</button>
+    <button id="btnStop" class="btn">■ STOP</button>
+    <button id="btnExport" class="btn">💾 EXPORT</button>
+  </header>
+
+  <div class="controls">
+    <div class="group"><label>BPM</label><input id="bpm" class="field" type="number" min="40" max="240" value="120" /></div>
+    <div class="group"><label>Bars</label><select id="bars" class="field"></select></div>
+    <div class="group"><label>Grid</label>
+      <select id="grid" class="field">
+        <option value="4">1/4</option><option value="8">1/8</option>
+        <option value="16" selected>1/16</option><option value="32">1/32</option>
+      </select>
+    </div>
+    <div class="group"><label>Root</label><select id="root" class="field"></select></div>
+    <div class="group"><label>Scale</label>
+      <select id="scale" class="field">
+        <option value="none">None</option>
+        <option value="major" selected>Major</option>
+        <option value="minor">Minor</option>
+        <option value="pentatonic">Pentatonic</option>
+      </select>
+    </div>
+    <div class="group"><label>Velocity</label><input id="vel" class="field" type="number" min="10" max="127" value="100" /></div>
+    <div class="group"><label>Wave</label>
+      <select id="wave" class="field">
+        <option selected>analog-pad</option>
+        <option>sine</option><option>triangle</option><option>square</option><option>sawtooth</option>
+      </select>
+    </div>
+    <div class="group"><label>Loop</label><input id="loopToggle" type="checkbox" checked /></div>
+  </div>
+
+  <div class="workspace">
+    <div class="pianokeys" id="keys"></div>
+    <div class="rollwrap" id="rollwrap">
+      <div class="ruler" id="ruler"></div>
+      <svg id="roll" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+  </div>
+
+  <div class="sidebar" id="chordsBar">
+    <span class="hint">ASCII Chords → drag into grid</span>
+    <div class="chip" draggable="true" data-ctype="M">Maj</div>
+    <div class="chip" draggable="true" data-ctype="m">min</div>
+    <div class="chip" draggable="true" data-ctype="7">7</div>
+    <div class="chip" draggable="true" data-ctype="M7">Maj7</div>
+    <div class="chip" draggable="true" data-ctype="sus2">sus2</div>
+    <div class="chip" draggable="true" data-ctype="sus4">sus4</div>
+    <div class="chip" draggable="true" data-ctype="dim">dim</div>
+    <div class="chip" draggable="true" data-ctype="aug">aug</div>
+  </div>
+
+  <div class="legend">
+    Click to add • Drag to move/resize • Alt+Drag = clone • <b>Shift-click</b> = multi-select •
+    <b>Shift+Drag</b> = lasso • <b>Double-click</b> = delete • <b>Delete</b> = remove selection
+  </div>
+</div>
+
+<script>
+(() => {
+  // ====== Config ============================================================
+  const ROWS = 37;
+  const PITCH_MIN = 36;                      // C2
+  const PITCH_MAX = PITCH_MIN + ROWS - 1;    // inclusive
+  const ROW_H = 20;                          // px per row
+  const CELL_W_UNIT = 24;                    // width per 1/16 (scaled by grid)
+  const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+  // Scales & chords
+  const SCALES = {
+    none: [],
+    major: [0,2,4,5,7,9,11],
+    minor: [0,2,3,5,7,8,10],
+    pentatonic: [0,3,5,7,10],
+  };
+  const CHORDS = {
+    'M':   [0,4,7],
+    'm':   [0,3,7],
+    '7':   [0,4,7,10],
+    'M7':  [0,4,7,11],
+    'sus2':[0,2,7],
+    'sus4':[0,5,7],
+    'dim': [0,3,6],
+    'aug': [0,4,8],
+  };
+
+  // ====== State =============================================================
+  let bars = 4;
+  let gridDiv = 16; // 4, 8, 16, 32
+  let bpm = 120;
+  let baseVelocity = 100;
+  let wave = 'analog-pad';
+  let loopEnabled = true;
+
+  const notes = []; // {id, pitch, start, dur, vel}
+  let idSeq = 1;
+
+  // Selection state
+  const selected = new Set(); // note ids
+  let lasso = null;           // {x,y,w,h} in SVG coords when Shift+drag
+  let drag = null;            // active drag op (move/resize/group)
+
+  // ====== DOM ===============================================================
+  const roll = document.getElementById('roll');
+  const wrap = document.getElementById('rollwrap');
+  const keys = document.getElementById('keys');
+  const ruler = document.getElementById('ruler');
+
+  const elBars = document.getElementById('bars');
+  const elGrid = document.getElementById('grid');
+  const elBpm = document.getElementById('bpm');
+  const elRoot = document.getElementById('root');
+  const elScale = document.getElementById('scale');
+  const elVel = document.getElementById('vel');
+  const elWave = document.getElementById('wave');
+  const elLoop = document.getElementById('loopToggle');
+
+  const btnPlay = document.getElementById('btnPlay');
+  const btnStop = document.getElementById('btnStop');
+  const btnExport = document.getElementById('btnExport');
+
+  // ====== Utilities =========================================================
+  function midiToName(n){ const o=Math.floor(n/12)-1; return NOTE_NAMES[n%12]+o; }
+  function isBlack(n){ return [1,3,6,8,10].includes(n%12); }
+
+  function beatsToPx(beats){
+    const sixteenth = CELL_W_UNIT * (16 / gridDiv);
+    return beats * sixteenth;
+  }
+  function pxToBeats(px){
+    const sixteenth = CELL_W_UNIT * (16 / gridDiv);
+    return px / sixteenth;
+  }
+  function snapBeats(b){
+    const step = 4 / (gridDiv/4); // e.g., 0.25 for 1/16
+    return Math.round(b/step)*step;
+  }
+
+  function beatsToMidiDur(beats){
+    const map = {1:'4', 0.5:'8', 0.25:'16', 0.125:'32', 2:'2', 4:'1'};
+    const keys = Object.keys(map).map(Number).sort((a,b)=>Math.abs(a-beats)-Math.abs(b-a));
+    for(const k of keys){ if(Math.abs(k-beats) < 1e-6) return map[k]; }
+    const ticks = Math.round(beats*128); return 'T'+ticks;
+  }
+
+  // ====== Build top controls ===============================================
+  for(let i=1;i<=16;i++){
+    const o=document.createElement('option');
+    o.value=i; o.textContent=i+" bar"+(i>1?'s':''); if(i===bars) o.selected=true;
+    elBars.appendChild(o);
+  }
+  for(let n=0;n<12;n++){
+    const o=document.createElement('option');
+    o.value=n; o.textContent=NOTE_NAMES[n]; if(n===0) o.selected=true;
+    elRoot.appendChild(o);
+  }
+
+  // ====== Piano Keys ========================================================
+  function renderKeys(){
+    keys.innerHTML='';
+    for(let r=0;r<ROWS;r++){
+      const midi = PITCH_MAX - r;
+      const k = document.createElement('div');
+      k.className = 'key' + (isBlack(midi)?' black':'');
+      k.style.height = ROW_H+'px';
+      k.textContent = midiToName(midi);
+      keys.appendChild(k);
+    }
+  }
+
+  // ====== Grid ==============================================================
+  function renderGrid(){
+    const width = Math.ceil(beatsToPx(bars*4));
+    const height = ROWS*ROW_H;
+    roll.setAttribute('width', width);
+    roll.setAttribute('height', height);
+    roll.innerHTML = '';
+
+    // Alternate bar backgrounds
+    for(let b=0; b<bars; b++){
+      const barRect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+      barRect.setAttribute('x', beatsToPx(b*4));
+      barRect.setAttribute('y', 0);
+      barRect.setAttribute('width', beatsToPx(4));
+      barRect.setAttribute('height', height);
+      barRect.setAttribute('class', b%2===0 ? 'bar-bg-a' : 'bar-bg-b');
+      roll.appendChild(barRect);
+    }
+
+    // Scale highlight rows
+    const root = parseInt(elRoot.value,10);
+    const scale = elScale.value;
+    if(scale !== 'none'){
+      const allowed = new Set(SCALES[scale].map(s => (root+s)%12));
+      for(let r=0;r<ROWS;r++){
+        const midi = PITCH_MAX - r;
+        if(allowed.has(midi%12)){
+          const s = document.createElementNS('http://www.w3.org/2000/svg','rect');
+          s.setAttribute('x',0); s.setAttribute('y',r*ROW_H);
+          s.setAttribute('width',width); s.setAttribute('height',ROW_H);
+          s.setAttribute('class','row-scale'); roll.appendChild(s);
+        }
+      }
+    }
+
+    // Vertical grid lines
+    const totalSub = bars * 4 * (gridDiv/4);
+    for(let i=0;i<=totalSub;i++){
+      const beat = i/(gridDiv/4);
+      const x = Math.round(beatsToPx(beat)) + .5;
+      const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+      line.setAttribute('x1',x); line.setAttribute('y1',0);
+      line.setAttribute('x2',x); line.setAttribute('y2',height);
+      const onBar = (Math.abs(beat%4) < 1e-6);
+      const onBeat = (Math.abs(beat - Math.round(beat)) < 1e-6);
+      line.setAttribute('class','grid-line ' + (onBar?'bold':(onBeat?'':'')));
+      roll.appendChild(line);
+    }
+
+    // Notes
+    for(const n of notes) addNoteToSVG(n);
+
+    // Playhead
+    const ph = document.createElementNS('http://www.w3.org/2000/svg','line');
+    ph.setAttribute('id','playhead');
+    ph.setAttribute('x1',0); ph.setAttribute('y1',0);
+    ph.setAttribute('x2',0); ph.setAttribute('y2',height);
+    ph.setAttribute('class','playhead');
+    roll.appendChild(ph);
+
+    // Ruler (ASCII cells)
+    ruler.innerHTML = '';
+    for(let b=0;b<bars;b++){
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.style.minWidth = beatsToPx(4) + 'px';
+      cell.textContent = `| ${String(b+1).padStart(2,'0')} |`;
+      ruler.appendChild(cell);
+    }
+
+    // Lasso rectangle (if any)
+    if(lasso){
+      const L = document.createElementNS('http://www.w3.org/2000/svg','rect');
+      L.setAttribute('class','lasso');
+      L.setAttribute('x', lasso.x);
+      L.setAttribute('y', lasso.y);
+      L.setAttribute('width', Math.max(1, lasso.w));
+      L.setAttribute('height', Math.max(1, lasso.h));
+      roll.appendChild(L);
+    }
+  }
+
+  function addNoteToSVG(n){
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    g.setAttribute('class','note');
+    g.dataset.id = n.id;
+
+    const x = Math.round(beatsToPx(n.start));
+    const w = Math.max(6, Math.round(beatsToPx(n.dur)));
+    const y = (PITCH_MAX - n.pitch) * ROW_H + 2;
+    const h = ROW_H - 4;
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    rect.setAttribute('x',x); rect.setAttribute('y',y);
+    rect.setAttribute('width',w); rect.setAttribute('height',h);
+    if(selected.has(n.id)) rect.classList.add('sel');
+
+    // resize handles (thin, but 8-bit yellow)
+    const left = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    left.setAttribute('x',x-3); left.setAttribute('y',y);
+    left.setAttribute('width',6); left.setAttribute('height',h);
+    left.setAttribute('class','handle'); left.dataset.handle='left';
+
+    const right = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    right.setAttribute('x',x+w-3); right.setAttribute('y',y);
+    right.setAttribute('width',6); right.setAttribute('height',h);
+    right.setAttribute('class','handle'); right.dataset.handle='right';
+
+    g.appendChild(rect); g.appendChild(left); g.appendChild(right);
+    roll.appendChild(g);
+  }
+
+  function refreshNoteGraphics(id){
+    const n = notes.find(x=>x.id===id); if(!n) return;
+    const g = roll.querySelector('g.note[data-id="'+id+'"]'); if(!g) return;
+    const [rect,left,right] = g.querySelectorAll('rect');
+    const x = Math.round(beatsToPx(n.start));
+    const w = Math.max(6, Math.round(beatsToPx(n.dur)));
+    const y = (PITCH_MAX - n.pitch) * ROW_H + 2;
+    const h = ROW_H - 4;
+
+    rect.setAttribute('x',x); rect.setAttribute('y',y);
+    rect.setAttribute('width',w); rect.setAttribute('height',h);
+    rect.classList.toggle('sel', selected.has(id));
+    left.setAttribute('x',x-3); left.setAttribute('y',y); left.setAttribute('height',h);
+    right.setAttribute('x',x+w-3); right.setAttribute('y',y); right.setAttribute('height',h);
+  }
+
+  // ====== Pointer helpers ===================================================
+  function gridPos(evt){
+    const pt = roll.createSVGPoint();
+    pt.x = evt.clientX; pt.y = evt.clientY;
+    const svgP = pt.matrixTransform(roll.getScreenCTM().inverse());
+    const x = Math.max(0, Math.min(svgP.x, parseFloat(roll.getAttribute('width'))));
+    const y = Math.max(0, Math.min(svgP.y, parseFloat(roll.getAttribute('height'))));
+    return { x, y };
+  }
+
+  // ====== Mouse / Interaction ==============================================
+  // Drag object shapes:
+  // - {mode:'move-one'|'move-group'|'resizeL'|'resizeR'|'new'|'lasso', ...}
+
+  roll.addEventListener('mousedown', (e)=>{
+    const p = gridPos(e);
+    const beat = pxToBeats(p.x);
+    const row = Math.floor(p.y/ROW_H);
+    const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, PITCH_MAX - row));
+
+    const g = e.target.closest('g.note');
+    const isShift = e.shiftKey;
+    const isAlt = e.altKey;
+
+    if(isShift && !g){
+      // Start lasso selection
+      lasso = {x: p.x, y: p.y, w: 1, h: 1, startX: p.x, startY: p.y};
+      drag = {mode:'lasso'};
+      renderGrid();
+      return;
+    }
+
+    if(g){
+      const id = parseInt(g.dataset.id,10);
+      // Selection toggle with Shift
+      if(isShift && !selected.has(id)){
+        selected.add(id); refreshNoteGraphics(id); return;
+      } else if(isShift && selected.has(id)){
+        selected.delete(id); refreshNoteGraphics(id); return;
+      }
+
+      const n = notes.find(x=>x.id===id);
+      if(!n) return;
+
+      // Decide group vs single
+      const movingIds = selected.size>0 && selected.has(id) ? Array.from(selected) : [id];
+      const snapshot = movingIds.map(i=>{
+        const nn = notes.find(n=>n.id===i);
+        return {id:i, start: nn.start, pitch: nn.pitch, dur: nn.dur};
+      });
+
+      // Clone on Alt
+      if(isAlt){
+        const clones = [];
+        for(const s of snapshot){
+          const orig = notes.find(nn=>nn.id===s.id);
+          const c = {...orig, id: ++idSeq};
+          notes.push(c);
+          selected.add(c.id);
+          clones.push(c.id);
+        }
+      }
+
+      // Handle bars
+      if(e.target.dataset.handle==='left'){
+        drag = {mode:'resizeL', id, startX: p.x, orig: {start:n.start, dur:n.dur}};
+      } else if(e.target.dataset.handle==='right'){
+        drag = {mode:'resizeR', id, startX: p.x, orig: {start:n.start, dur:n.dur}};
+      } else {
+        drag = {
+          mode: movingIds.length>1 ? 'move-group' : 'move-one',
+          ids: movingIds,
+          startBeat: pxToBeats(p.x),
+          snapshot
+        };
+      }
+    } else {
+      // Create new note
+      const start = snapBeats(beat);
+      const n = { id: ++idSeq, pitch, start, dur: 1, vel: baseVelocity };
+      notes.push(n); addNoteToSVG(n);
+      selected.clear(); selected.add(n.id);
+      drag = {mode:'resizeR', id:n.id, startX:p.x, orig:{start:n.start, dur:n.dur}};
+    }
+  });
+
+  window.addEventListener('mousemove', (e)=>{
+    if(!drag) return;
+    const p = gridPos(e);
+    const b = pxToBeats(p.x);
+
+    if(drag.mode==='lasso' && lasso){
+      lasso.w = p.x - lasso.startX;
+      lasso.h = p.y - lasso.startY;
+      // Compute selection
+      selected.clear();
+      const x0 = Math.min(lasso.startX, p.x), x1 = Math.max(lasso.startX, p.x);
+      const y0 = Math.min(lasso.startY, p.y), y1 = Math.max(lasso.startY, p.y);
+      for(const n of notes){
+        const nx = beatsToPx(n.start), nw = beatsToPx(n.dur);
+        const ny = (PITCH_MAX-n.pitch)*ROW_H+2, nh=ROW_H-4;
+        if(nx < x1 && nx+nw > x0 && ny < y1 && ny+nh > y0) selected.add(n.id);
+      }
+      renderGrid();
+      return;
+    }
+
+    if(drag.mode==='move-one'){
+      const id = drag.ids[0];
+      const n = notes.find(x=>x.id===id); if(!n) return;
+      const delta = b - drag.startBeat;
+      n.start = snapBeats(drag.snapshot[0].start + delta);
+      const row = Math.floor(p.y/ROW_H);
+      n.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, PITCH_MAX - row));
+      refreshNoteGraphics(id);
+    } else if(drag.mode==='move-group'){
+      const delta = b - drag.startBeat;
+      const row = Math.floor(p.y/ROW_H);
+      const deltaRows = row - (PITCH_MAX - drag.snapshot[0].pitch);
+      for(const snap of drag.snapshot){
+        const n = notes.find(x=>x.id===snap.id);
+        n.start = snapBeats(snap.start + delta);
+        const newPitch = snap.pitch + ( -deltaRows );
+        n.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, newPitch));
+        refreshNoteGraphics(n.id);
+      }
+    } else if(drag.mode==='resizeL'){
+      const n = notes.find(x=>x.id===drag.id); if(!n) return;
+      const newStart = snapBeats(pxToBeats(p.x));
+      const end = n.start + n.dur;
+      n.start = Math.min(newStart, end - (4/gridDiv));
+      n.dur = Math.max(4/gridDiv, end - n.start);
+      refreshNoteGraphics(n.id);
+    } else if(drag.mode==='resizeR'){
+      const n = notes.find(x=>x.id===drag.id); if(!n) return;
+      const newEnd = snapBeats(pxToBeats(p.x));
+      n.dur = Math.max(4/gridDiv, newEnd - n.start);
+      refreshNoteGraphics(n.id);
+    }
+  });
+
+  window.addEventListener('mouseup', ()=>{
+    if(drag && drag.mode==='lasso'){ lasso=null; renderGrid(); }
+    drag = null;
+  });
+
+  // Double-click delete single note
+  roll.addEventListener('dblclick', (e)=>{
+    const g = e.target.closest('g.note');
+    if(g){
+      const id = parseInt(g.dataset.id,10);
+      const idx = notes.findIndex(n=>n.id===id);
+      if(idx>=0){ notes.splice(idx,1); }
+      selected.delete(id);
+      renderGrid();
+    }
+  });
+
+  // Context menu delete one
+  roll.addEventListener('contextmenu', (e)=>{
+    e.preventDefault();
+    const g = e.target.closest('g.note');
+    if(g){
+      const id = parseInt(g.dataset.id,10);
+      const idx = notes.findIndex(n=>n.id===id);
+      if(idx>=0){ notes.splice(idx,1); }
+      selected.delete(id);
+      renderGrid();
+    }
+  });
+
+  // Delete key removes selection
+  window.addEventListener('keydown', (e)=>{
+    if(e.key === 'Delete' || e.key === 'Backspace'){
+      for(const id of Array.from(selected)){
+        const idx = notes.findIndex(n=>n.id===id);
+        if(idx>=0) notes.splice(idx,1);
+      }
+      selected.clear();
+      renderGrid();
+    }
+  });
+
+  // ====== Chord Drag & Drop =================================================
+  document.querySelectorAll('.chip').forEach(chip=>{
+    chip.addEventListener('dragstart', e=>{
+      e.dataTransfer.setData('text/plain', chip.dataset.ctype);
+    });
+  });
+  roll.addEventListener('dragover', e=>e.preventDefault());
+  roll.addEventListener('drop', (e)=>{
+    e.preventDefault();
+    const ctype = e.dataTransfer.getData('text/plain');
+    if(!ctype || !CHORDS[ctype]) return;
+    const p = gridPos(e);
+    const startBeat = snapBeats(pxToBeats(p.x));
+    const row = Math.floor(p.y/ROW_H);
+    const basePitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, PITCH_MAX - row));
+    const intervals = CHORDS[ctype];
+    const vel = baseVelocity;
+    const dur = 1;
+    for(const iv of intervals){
+      const pitch = basePitch + iv;
+      const n = { id: ++idSeq, pitch, start: startBeat, dur, vel };
+      notes.push(n);
+    }
+    renderGrid();
+  });
+
+  // ====== Transport + Synth =================================================
+  let ctx = null;
+  let master = null;
+  let playing = false;
+  let startTime = 0;
+  let raf = null;
+  let scheduler = null;
+  const activeVoices = new Set(); // {osc[], gain, stop(t)}
+
+  function ensureCtx(){
+    if(ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC();
+    master = ctx.createGain();
+    master.gain.value = 0.7;
+    master.connect(ctx.destination);
+  }
+
+  function midiToFreq(n){ return 440 * Math.pow(2,(n-69)/12); }
+
+  function makeVoice(midi, vel=100){
+    // Classic analog pad:
+    //  - 2 detuned saws (+/- 5 cents)
+    //  - gentle low-pass (cutoff scales with vel)
+    //  - slowish ADSR
+    const o1 = ctx.createOscillator();
+    const o2 = ctx.createOscillator();
+    o1.type = 'sawtooth'; o2.type = 'sawtooth';
+    const f = midiToFreq(midi);
+    o1.frequency.value = f;
+    o2.frequency.value = f;
+    o1.detune.value = -5; o2.detune.value = +5;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 800 + vel*6; // brighter with velocity
+    filter.Q.value = 0.7;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0.0001;
+
+    o1.connect(filter); o2.connect(filter);
+    filter.connect(gain);
+    gain.connect(master);
+
+    return {osc:[o1,o2], filter, gain};
+  }
+
+  function startVoice(voice, when, durBeats){
+    const spb = 60 / bpm;
+    const A = 0.04, D = 0.25, S = 0.6, R = 0.6; // ADSR in seconds (approx pad)
+    const dur = Math.max(0.05, durBeats * spb);
+    const g = voice.gain.gain;
+
+    g.cancelScheduledValues(when);
+    g.setValueAtTime(0.0001, when);
+    g.linearRampToValueAtTime(0.3, when + A);
+    g.linearRampToValueAtTime(0.3*S, when + A + D);
+    const gateOff = when + dur; // note-off
+    g.linearRampToValueAtTime(0.3*S, gateOff);
+    g.linearRampToValueAtTime(0.0001, gateOff + R);
+
+    for(const o of voice.osc){ o.start(when); o.stop(gateOff + R + 0.05); }
+
+    const stopAt = gateOff + R + 0.06;
+    activeVoices.add({v:voice, stopAt});
+    // Cleanup
+    setTimeout(()=>{
+      try { for(const o of voice.osc){ o.disconnect(); } voice.filter.disconnect(); voice.gain.disconnect(); } catch(_){}
+      activeVoices.forEach(entry=>{ if(entry.v===voice) activeVoices.delete(entry); });
+    }, (stopAt - ctx.currentTime + 0.1)*1000);
+  }
+
+  function stopAllVoices(){
+    // hard stop
+    const now = ctx.currentTime;
+    activeVoices.forEach(({v})=>{
+      try{
+        v.gain.gain.cancelScheduledValues(now);
+        v.gain.gain.setTargetAtTime(0.0001, now, 0.01);
+        for(const o of v.osc){ try{o.stop(now+0.02);}catch(_){} }
+      }catch(_){}
+    });
+    activeVoices.clear();
+  }
+
+  // Simple scheduler
+  function scheduleWindow(){
+    const spb = 60 / bpm;
+    const loopLen = bars*4*spb;
+    const lookahead = 0.15;
+
+    const nowLoop = ((ctx.currentTime - startTime) % loopLen + loopLen) % loopLen;
+    const windowEnd = nowLoop + lookahead;
+
+    for(const n of notes){
+      const ns = (n.start * spb) % loopLen;
+      const ndur = n.dur;
+      // schedule if ns is inside window; also handle wrapping
+      const candidates = [ns, ns+loopLen];
+      for(const s of candidates){
+        const rel = s - nowLoop;
+        if(rel > 0 && rel <= lookahead){
+          const when = ctx.currentTime + rel;
+          const voice = makeVoice(n.pitch, n.vel ?? baseVelocity);
+          startVoice(voice, when, ndur);
+        }
+      }
+    }
+
+    // If not looping and we passed end, stop transport
+    if(!loopEnabled){
+      const elapsed = ctx.currentTime - startTime;
+      if(elapsed >= loopLen){
+        stopTransport();
+      }
+    }
+  }
+
+  function updatePlayhead(){
+    if(!playing) return;
+    const spb = 60 / bpm;
+    const x = beatsToPx(((ctx.currentTime - startTime)/spb) % (bars*4));
+    const ph = document.getElementById('playhead');
+    if(ph){ ph.setAttribute('x1', x); ph.setAttribute('x2', x); }
+    raf = requestAnimationFrame(updatePlayhead);
+  }
+
+  function startTransport(){
+    ensureCtx();
+    ctx.resume();
+    playing = true;
+    startTime = ctx.currentTime;
+
+    // schedule loop
+    if(scheduler) clearInterval(scheduler);
+    scheduler = setInterval(scheduleWindow, 60); // ~16Hz
+
+    updatePlayhead();
+  }
+
+  function stopTransport(){
+    playing = false;
+    if(raf) cancelAnimationFrame(raf); raf=null;
+    if(scheduler) clearInterval(scheduler); scheduler=null;
+
+    stopAllVoices();
+
+    const ph = document.getElementById('playhead');
+    if(ph){ ph.setAttribute('x1', 0); ph.setAttribute('x2', 0); }
+  }
+
+  // ====== Wire controls =====================================================
+  elBars.addEventListener('change', ()=>{ bars = parseInt(elBars.value,10); renderGrid(); });
+  elGrid.addEventListener('change', ()=>{ gridDiv = parseInt(elGrid.value,10); renderGrid(); });
+  elBpm.addEventListener('change', ()=>{ bpm = Math.max(40, Math.min(240, parseInt(elBpm.value,10)||120)); });
+  elVel.addEventListener('change', ()=>{ baseVelocity = Math.max(10, Math.min(127, parseInt(elVel.value,10)||100)); });
+  elWave.addEventListener('change', ()=>{ wave = elWave.value; /* reserved for future multi-engine */ });
+  elRoot.addEventListener('change', renderGrid);
+  elScale.addEventListener('change', renderGrid);
+  elLoop.addEventListener('change', ()=>{ loopEnabled = elLoop.checked; });
+
+  btnPlay.addEventListener('click', startTransport);
+  btnStop.addEventListener('click', stopTransport);
+
+  // ====== MIDI Export =======================================================
+  btnExport.addEventListener('click', ()=>{
+    if(typeof MIDIWriter === 'undefined'){ alert('MIDI export library failed to load.'); return; }
+    const track = new MIDIWriter.Track();
+    track.setTempo(bpm);
+
+    const events = notes.map(n=>({
+      pitch: [n.pitch],
+      duration: beatsToMidiDur(n.dur),
+      startTick: Math.round(n.start * 128),
+      velocity: Math.max(1, Math.min(100, Math.round((n.vel ?? baseVelocity)*100/127)))
+    }));
+    events.sort((a,b)=>a.startTick-b.startTick);
+    for(const e of events){
+      const ne = new MIDIWriter.NoteEvent({pitch:e.pitch, duration: e.duration, startTick:e.startTick, velocity: e.velocity});
+      track.addEvent(ne);
+    }
+    const write = new MIDIWriter.Writer(track);
+    const uri = write.dataUri();
+    const a = document.createElement('a'); a.href = uri; a.download = 'pattern.mid'; a.click();
+  });
+
+  // ====== Init ==============================================================
+  renderKeys();
+  renderGrid();
+
+  // Small seed progression (kept from your demo)
+  (function seedDemo(){
+    const root = 48; // C3
+    const prog = [ ['M',0], ['m',2], ['M',5], ['M7',7] ];
+    let t=0;
+    for(const [ctype, offset] of prog){
+      const base = root + offset;
+      for(const iv of CHORDS[ctype]){
+        notes.push({ id: ++idSeq, pitch: base+iv, start: t, dur: 1, vel: 100 });
+      }
+      t+=1;
+    }
+    renderGrid();
+  })();
+
+})();
+</script>
+</body>
+</html>

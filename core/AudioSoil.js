@@ -1,11 +1,11 @@
 // ======================================================
-// 🎚️ AudioSoil.js — Core Adaptive Stem Engine (GLYPH v0.4)
+// 🎚️ AudioSoil.js — Core Adaptive Stem Engine (GLYPH v0.6)
 // ------------------------------------------------------
-// v0.4 updates:
-// - Per-frame analyser caching (no redundant FFT reads)
-// - Uses constructor fftSize for all stem analysers
-// - Safe bounds & NaN guards
-// - Same public API (getStemEnergy, getEnergies, etc.)
+// v0.6 updates:
+// - Robust playback graph: persistent gain→analyser→master chain
+// - New source per play to avoid stale/paused BufferSource
+// - Vocals band tuned (120–3000 Hz) so vocal visuals react
+// - Per-frame analyser caching (unchanged API)
 // ======================================================
 
 export class AudioSoil {
@@ -22,8 +22,8 @@ export class AudioSoil {
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = fftSize;
     this.analyser.smoothingTimeConstant = 0.0;
-    this.analyser.minDecibels = -70;
-    this.analyser.maxDecibels = -5;
+    this.analyser.minDecibels  = -70;
+    this.analyser.maxDecibels  = -5;
     this.master.connect(this.analyser);
 
     // --- Buffers & state ---
@@ -59,39 +59,34 @@ export class AudioSoil {
   }
 
   // ======================================================
-  // 🎧 Create stem graph
+  // 🎧 Create stem graph (persistent analyser chain)
   // ======================================================
   addStem(name, buffer) {
-    const src = this.ctx.createBufferSource();
-    src.buffer = buffer;
-    src.loop = true;
-
+    // persistent nodes (gain→analyser→master)
     const gain = this.ctx.createGain();
     gain.gain.value = 1.0;
 
     const ana = this.ctx.createAnalyser();
-    // Use SAME fftSize as the global analyser for consistent indexing
     ana.fftSize = this.analyser.fftSize;
     ana.smoothingTimeConstant = 0.0;
     ana.minDecibels = this.analyser.minDecibels;
     ana.maxDecibels = this.analyser.maxDecibels;
 
-    src.connect(gain);
     gain.connect(ana);
     ana.connect(this.master);
 
     const data = new Uint8Array(ana.frequencyBinCount);
 
-    // per-stem cache & env state
     this.stems[name] = {
-      src,
+      buffer,        // store decoded audio buffer
+      src: null,     // will be created on play
       gain,
       ana,
       data,
       active: false,
       env: 0,
-      _lastFrame: -1,     // frame stamp when analyser was last read
-      _lastValue: 0       // cached smoothed value for last call
+      _lastFrame: -1,
+      _lastValue: 0
     };
   }
 
@@ -104,14 +99,17 @@ export class AudioSoil {
       return;
     }
 
-    for (const [_, s] of Object.entries(this.stems)) {
+    for (const s of Object.values(this.stems)) {
       if (s.active) continue;
+
+      // always create a fresh BufferSource for reliable playback
       const src = this.ctx.createBufferSource();
-      src.buffer = s.src.buffer;
+      src.buffer = s.buffer;
       src.loop = loop;
+
+      // connect into the persistent chain
       src.connect(s.gain);
-      s.gain.connect(s.ana);
-      s.ana.connect(this.master);
+
       src.start();
       s.src = src;
       s.active = true;
@@ -122,6 +120,7 @@ export class AudioSoil {
     for (const s of Object.values(this.stems)) {
       if (!s.active) continue;
       try { s.src.stop(); } catch {}
+      s.src = null;
       s.active = false;
     }
   }
@@ -139,10 +138,9 @@ export class AudioSoil {
     const s = this.stems[name];
     if (!s) return 0;
 
-    // bump frame stamp (once per external frame call; see getEnergies)
     const frame = this._frameStamp;
 
-    // If we've already computed this stem this frame, reuse it
+    // reuse cached value if analyser already read this frame
     if (s._lastFrame === frame) return s._lastValue ?? 0;
     s._lastFrame = frame;
 
@@ -150,7 +148,6 @@ export class AudioSoil {
     try {
       s.ana.getByteFrequencyData(s.data);
     } catch {
-      // In early frames some browsers can throw; return cached or 0
       return s._lastValue ?? 0;
     }
 
@@ -195,8 +192,12 @@ export class AudioSoil {
     }
 
     this.analyser.getByteFrequencyData(this._spec);
+
     let sum = 0;
-    for (const v of this._spec) sum += (v ?? 0) * (v ?? 0);
+    for (let i = 0; i < this._spec.length; i++) {
+      const v = (this._spec[i] ?? 0);
+      sum += v * v;
+    }
 
     let rms = Math.sqrt(sum / this._spec.length) / 255;
     if (!isFinite(rms) || isNaN(rms)) rms = 0;
@@ -216,12 +217,11 @@ export class AudioSoil {
     this._frameStamp = (performance.now() | 0);
 
     return {
-      bass:   this.hasStem('bass')   ? this.getStemEnergy('bass',   40,  200, 0.3) : 0,
-      drums:  this.hasStem('drums')  ? this.getStemEnergy('drums',  60, 8000, 0.3) : 0,
-      vocals: this.hasStem('vocals') ? this.getStemEnergy('vocals',1000, 7000, 0.3) : 0,
-      other:  this.hasStem('other')  ? this.getStemEnergy('other',  200, 3000, 0.3) : 0,
-      // optional: global for easy scene-wide effects
-      // global: this.getGlobalEnergy()
+      bass:   this.hasStem('bass')   ? this.getStemEnergy('bass',   40,  250, 0.30) : 0,
+      drums:  this.hasStem('drums')  ? this.getStemEnergy('drums',  60, 8000, 0.30) : 0,
+      vocals: this.hasStem('vocals') ? this.getStemEnergy('vocals', 120, 3000, 0.25) : 0, // <-- fixed band
+      other:  this.hasStem('other')  ? this.getStemEnergy('other', 200, 3000, 0.30) : 0,
+      global: this.getGlobalEnergy()
     };
   }
 

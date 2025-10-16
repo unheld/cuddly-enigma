@@ -14,12 +14,13 @@ import { VisualOverlay2D } from './core/VisualOverlay2D.js';
 
 
 import { Drums } from './nodes/Drums.js';
-
+import { VocalNode } from './nodes/VocalNode.js';
 
 // ======================================================
 // 🔊 AUDIO CORE
 // ======================================================
 const audio = new AudioSoil({ fftSize: 2048 });
+
 window.audio = audio;
 
 // ======================================================
@@ -29,9 +30,31 @@ const visual3D = new VisualSoil3D('#gl3d');
 const visual2D = new VisualOverlay2D('#overlay2d');
 
 // Register demo nodes
-const drumsNode = new Drums(visual3D.scene, visual3D.renderer, visual3D.camera);
+const drumsNode = new Drums(visual3D.scene);  // renderer/camera no longer needed
 visual3D.addNode(drumsNode);
 
+const vocalsNode = new VocalNode(visual3D.scene, audio);
+visual3D.addNode(vocalsNode);
+
+// ======================================================
+// 🕹️ NODE TOGGLE UI
+// ======================================================
+const toggleDrumsBtn = document.getElementById('toggleDrums');
+let drumsActive = true;
+
+toggleDrumsBtn.addEventListener('click', () => {
+  drumsActive = !drumsActive;
+
+  if (drumsActive) {
+    visual3D.addNode(drumsNode);
+    toggleDrumsBtn.textContent = '🥁 Drums ON';
+    toggleDrumsBtn.style.color = '#0ff';
+  } else {
+    visual3D.removeNode(drumsNode);
+    toggleDrumsBtn.textContent = '🥁 Drums OFF';
+    toggleDrumsBtn.style.color = '#888';
+  }
+});
 
 
 // ======================================================
