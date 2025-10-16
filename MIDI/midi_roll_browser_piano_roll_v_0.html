@@ -194,8 +194,8 @@
   </div>
 
   <div class="legend">
-    Click to add • Drag to move/resize • Alt+Drag = clone • <b>Shift-click</b> = multi-select •
-    <b>Shift+Drag</b> = lasso • <b>Double-click</b> = delete • <b>Delete</b> = remove selection
+    Drag background = lasso • Drag note = move/resize • Alt+Drag = clone • <b>Shift-click</b> = multi-select •
+    <b>Double-click empty</b> = add note • <b>Double-click note</b> = delete • <b>Delete</b> = remove selection
   </div>
 </div>
 
@@ -319,6 +319,7 @@
     roll.setAttribute('width', width);
     roll.setAttribute('height', height);
     roll.innerHTML = '';
+    lassoRect = null;
 
     // Alternate bar backgrounds
     for(let b=0; b<bars; b++){
@@ -533,9 +534,6 @@
 
   roll.addEventListener('mousedown', (e)=>{
     const p = gridPos(e);
-    const beat = pxToBeats(p.x);
-    const row = Math.floor(p.y/ROW_H);
-    const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, PITCH_MAX - row));
 
     const g = e.target.closest('g.note');
     const isShift = e.shiftKey;
@@ -556,6 +554,14 @@
 
       const n = notes.find(x=>x.id===id);
       if(!n) return;
+
+      if(isShift && !e.target.dataset.handle){
+        drag = {
+          mode: 'toggle-select',
+          noteId: id
+        };
+        return;
+      }
 
       // Decide group vs single
       let movingIds = selected.size>0 && selected.has(id) ? Array.from(selected) : [id];
@@ -708,8 +714,9 @@
     drag = null;
   });
 
-  // Double-click delete single note
+  // Double-click add/remove notes
   roll.addEventListener('dblclick', (e)=>{
+    const p = gridPos(e);
     const g = e.target.closest('g.note');
     if(g){
       const id = parseInt(g.dataset.id,10);
@@ -717,7 +724,18 @@
       if(idx>=0){ notes.splice(idx,1); }
       selected.delete(id);
       renderGrid();
+      return;
     }
+
+    const beat = pxToBeats(p.x);
+    const row = Math.floor(p.y/ROW_H);
+    const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, PITCH_MAX - row));
+    const start = Math.max(0, snapBeats(beat));
+    const n = { id: ++idSeq, pitch, start, dur: 1, vel: baseVelocity };
+    notes.push(n);
+    selected.clear();
+    selected.add(n.id);
+    renderGrid();
   });
 
   // Context menu delete one
