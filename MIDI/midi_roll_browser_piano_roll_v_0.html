@@ -275,7 +275,7 @@
     return px / sixteenth;
   }
   function snapBeats(b){
-    const step = 4 / (gridDiv/4); // e.g., 0.25 for 1/16
+    const step = 4 / gridDiv; // e.g., 0.25 for 1/16
     return Math.round(b/step)*step;
   }
 
@@ -484,21 +484,45 @@
       if(!n) return;
 
       // Decide group vs single
-      const movingIds = selected.size>0 && selected.has(id) ? Array.from(selected) : [id];
-      const snapshot = movingIds.map(i=>{
+      let movingIds = selected.size>0 && selected.has(id) ? Array.from(selected) : [id];
+      let snapshot = movingIds.map(i=>{
         const nn = notes.find(n=>n.id===i);
         return {id:i, start: nn.start, pitch: nn.pitch, dur: nn.dur};
       });
 
       // Clone on Alt
       if(isAlt){
+        const originalIds = movingIds.slice();
+        const originalSnapshot = snapshot.map(s=>({...s}));
         const clones = [];
-        for(const s of snapshot){
+        selected.clear();
+        for(const s of originalSnapshot){
           const orig = notes.find(nn=>nn.id===s.id);
+          if(!orig) continue;
           const c = {...orig, id: ++idSeq};
           notes.push(c);
           selected.add(c.id);
+          addNoteToSVG(c);
           clones.push(c.id);
+        }
+        if(clones.length){
+          for(const originalId of originalIds){
+            refreshNoteGraphics(originalId);
+          }
+          movingIds = clones;
+          snapshot = movingIds.map(i=>{
+            const nn = notes.find(n=>n.id===i);
+            return {id:i, start: nn.start, pitch: nn.pitch, dur: nn.dur};
+          });
+        } else {
+          // Fallback: keep working with the originals if cloning failed
+          selected.clear();
+          for(const s of originalSnapshot){
+            selected.add(s.id);
+            refreshNoteGraphics(s.id);
+          }
+          movingIds = originalIds;
+          snapshot = originalSnapshot;
         }
       }
 
@@ -517,10 +541,13 @@
       }
     } else {
       // Create new note
-      const start = snapBeats(beat);
+      const start = Math.max(0, snapBeats(beat));
       const n = { id: ++idSeq, pitch, start, dur: 1, vel: baseVelocity };
+      const prevSelected = Array.from(selected);
+      selected.clear();
+      for(const sid of prevSelected){ refreshNoteGraphics(sid); }
+      selected.add(n.id);
       notes.push(n); addNoteToSVG(n);
-      selected.clear(); selected.add(n.id);
       drag = {mode:'resizeR', id:n.id, startX:p.x, orig:{start:n.start, dur:n.dur}};
     }
   });
@@ -550,7 +577,7 @@
       const id = drag.ids[0];
       const n = notes.find(x=>x.id===id); if(!n) return;
       const delta = b - drag.startBeat;
-      n.start = snapBeats(drag.snapshot[0].start + delta);
+      n.start = Math.max(0, snapBeats(drag.snapshot[0].start + delta));
       const row = Math.floor(p.y/ROW_H);
       n.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, PITCH_MAX - row));
       refreshNoteGraphics(id);
@@ -560,14 +587,14 @@
       const deltaRows = row - (PITCH_MAX - drag.snapshot[0].pitch);
       for(const snap of drag.snapshot){
         const n = notes.find(x=>x.id===snap.id);
-        n.start = snapBeats(snap.start + delta);
+        n.start = Math.max(0, snapBeats(snap.start + delta));
         const newPitch = snap.pitch + ( -deltaRows );
         n.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, newPitch));
         refreshNoteGraphics(n.id);
       }
     } else if(drag.mode==='resizeL'){
       const n = notes.find(x=>x.id===drag.id); if(!n) return;
-      const newStart = snapBeats(pxToBeats(p.x));
+      const newStart = Math.max(0, snapBeats(pxToBeats(p.x)));
       const end = n.start + n.dur;
       n.start = Math.min(newStart, end - (4/gridDiv));
       n.dur = Math.max(4/gridDiv, end - n.start);
