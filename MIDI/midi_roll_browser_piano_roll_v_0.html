@@ -241,9 +241,8 @@
   // Selection state
   const selected = new Set(); // note ids
   let lasso = null;           // {anchorX,anchorY,currentX,currentY}
-  let lassoRect = null;       // SVG rect element for live lasso feedback
   let drag = null;            // active drag op (move/resize/group)
-  const LASSO_DRAG_THRESHOLD = 6; // px before a background drag becomes a lasso
+  const LASSO_DRAG_THRESHOLD = 6; // px before shift+drag becomes a lasso
 
   // ====== DOM ===============================================================
   const roll = document.getElementById('roll');
@@ -386,7 +385,14 @@
 
     // Lasso rectangle (if any)
     if(lasso){
-      ensureLassoRect();
+      const box = lassoBounds(lasso);
+      const L = document.createElementNS('http://www.w3.org/2000/svg','rect');
+      L.setAttribute('class','lasso');
+      L.setAttribute('x', box.x);
+      L.setAttribute('y', box.y);
+      L.setAttribute('width', box.w);
+      L.setAttribute('height', box.h);
+      roll.appendChild(L);
     }
   }
 
@@ -459,29 +465,7 @@
     };
   }
 
-  function ensureLassoRect(){
-    if(!lasso) return;
-    if(!lassoRect || !lassoRect.ownerSVGElement){
-      lassoRect = document.createElementNS('http://www.w3.org/2000/svg','rect');
-      lassoRect.setAttribute('class','lasso');
-    }
-    const box = lassoBounds(lasso);
-    lassoRect.setAttribute('x', box.x);
-    lassoRect.setAttribute('y', box.y);
-    lassoRect.setAttribute('width', box.w);
-    lassoRect.setAttribute('height', box.h);
-    roll.appendChild(lassoRect);
-  }
-
-  function clearLassoRect(){
-    if(lassoRect && lassoRect.parentNode){
-      lassoRect.parentNode.removeChild(lassoRect);
-    }
-    lassoRect = null;
-  }
-
   function updateLassoSelection(startX, startY, currentX, currentY){
-    const previous = new Set(selected);
     selected.clear();
     const x0 = Math.min(startX, currentX);
     const x1 = Math.max(startX, currentX);
@@ -495,17 +479,6 @@
       if(nx < x1 && nx+nw > x0 && ny < y1 && ny+nh > y0){
         selected.add(n.id);
       }
-    }
-
-    const changed = new Set();
-    for(const id of previous){
-      if(!selected.has(id)) changed.add(id);
-    }
-    for(const id of selected){
-      if(!previous.has(id)) changed.add(id);
-    }
-    for(const id of changed){
-      refreshNoteGraphics(id);
     }
   }
 
@@ -557,7 +530,7 @@
 
   // ====== Mouse / Interaction ==============================================
   // Drag object shapes:
-  // - {mode:'move-one'|'move-group'|'resizeL'|'resizeR'|'lasso'|'toggle-select', ...}
+  // - {mode:'move-one'|'move-group'|'resizeL'|'resizeR'|'new'|'lasso'|'shift-primed', ...}
 
   roll.addEventListener('mousedown', (e)=>{
     const p = gridPos(e);
@@ -565,6 +538,16 @@
     const g = e.target.closest('g.note');
     const isShift = e.shiftKey;
     const isAlt = e.altKey;
+
+    if(isShift){
+      drag = {
+        mode: 'shift-primed',
+        noteId: g ? parseInt(g.dataset.id,10) : null,
+        startX: p.x,
+        startY: p.y
+      };
+      return;
+    }
 
     if(g){
       const id = parseInt(g.dataset.id,10);
@@ -637,14 +620,15 @@
         };
       }
     } else {
-      lasso = null;
-      clearLassoRect();
-      drag = {
-        mode: 'lasso',
-        anchorX: p.x,
-        anchorY: p.y,
-        hasRect: false
-      };
+      // Create new note
+      const start = Math.max(0, snapBeats(beat));
+      const n = { id: ++idSeq, pitch, start, dur: 1, vel: baseVelocity };
+      const prevSelected = Array.from(selected);
+      selected.clear();
+      for(const sid of prevSelected){ refreshNoteGraphics(sid); }
+      selected.add(n.id);
+      notes.push(n); addNoteToSVG(n);
+      drag = {mode:'resizeR', id:n.id, startX:p.x, orig:{start:n.start, dur:n.dur}};
     }
   });
 
@@ -653,27 +637,28 @@
     const p = gridPos(e);
     const b = pxToBeats(p.x);
 
-    if(drag.mode==='lasso'){
-      const dx = p.x - drag.anchorX;
-      const dy = p.y - drag.anchorY;
-      if(!drag.hasRect){
-        if(Math.hypot(dx, dy) < LASSO_DRAG_THRESHOLD){
-          return;
-        }
-        drag.hasRect = true;
+    if(drag.mode==='shift-primed'){
+      const dx = p.x - drag.startX;
+      const dy = p.y - drag.startY;
+      if(Math.hypot(dx, dy) >= LASSO_DRAG_THRESHOLD){
+        drag.mode = 'lasso';
         lasso = {
-          anchorX: drag.anchorX,
-          anchorY: drag.anchorY,
-          currentX: drag.anchorX,
-          currentY: drag.anchorY
+          anchorX: drag.startX,
+          anchorY: drag.startY,
+          currentX: p.x,
+          currentY: p.y
         };
+        updateLassoSelection(drag.startX, drag.startY, p.x, p.y);
+        renderGrid();
       }
-      if(lasso){
-        lasso.currentX = p.x;
-        lasso.currentY = p.y;
-        updateLassoSelection(lasso.anchorX, lasso.anchorY, p.x, p.y);
-        ensureLassoRect();
-      }
+      return;
+    }
+
+    if(drag.mode==='lasso' && lasso){
+      lasso.currentX = p.x;
+      lasso.currentY = p.y;
+      updateLassoSelection(lasso.anchorX, lasso.anchorY, p.x, p.y);
+      renderGrid();
       return;
     }
 
@@ -714,15 +699,9 @@
   window.addEventListener('mouseup', ()=>{
     if(!drag) return;
     if(drag.mode==='lasso'){
-      if(drag.hasRect){
-        lasso=null;
-        clearLassoRect();
-      } else if(selected.size){
-        const prev = Array.from(selected);
-        selected.clear();
-        for(const sid of prev){ refreshNoteGraphics(sid); }
-      }
-    } else if(drag.mode==='toggle-select'){
+      lasso=null;
+      renderGrid();
+    } else if(drag.mode==='shift-primed'){
       if(drag.noteId!==null){
         if(selected.has(drag.noteId)){
           selected.delete(drag.noteId);
