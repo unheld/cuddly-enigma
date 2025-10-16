@@ -240,8 +240,9 @@
 
   // Selection state
   const selected = new Set(); // note ids
-  let lasso = null;           // {x,y,w,h} in SVG coords when Shift+drag
+  let lasso = null;           // {anchorX,anchorY,currentX,currentY}
   let drag = null;            // active drag op (move/resize/group)
+  const LASSO_DRAG_THRESHOLD = 6; // px before shift+drag becomes a lasso
 
   // ====== DOM ===============================================================
   const roll = document.getElementById('roll');
@@ -275,7 +276,7 @@
     return px / sixteenth;
   }
   function snapBeats(b){
-    const step = 4 / (gridDiv/4); // e.g., 0.25 for 1/16
+    const step = 4 / gridDiv; // e.g., 0.25 for 1/16
     return Math.round(b/step)*step;
   }
 
@@ -383,12 +384,13 @@
 
     // Lasso rectangle (if any)
     if(lasso){
+      const box = lassoBounds(lasso);
       const L = document.createElementNS('http://www.w3.org/2000/svg','rect');
       L.setAttribute('class','lasso');
-      L.setAttribute('x', lasso.x);
-      L.setAttribute('y', lasso.y);
-      L.setAttribute('width', Math.max(1, lasso.w));
-      L.setAttribute('height', Math.max(1, lasso.h));
+      L.setAttribute('x', box.x);
+      L.setAttribute('y', box.y);
+      L.setAttribute('width', box.w);
+      L.setAttribute('height', box.h);
       roll.appendChild(L);
     }
   }
@@ -449,9 +451,85 @@
     return { x, y };
   }
 
+  function lassoBounds(l){
+    const x0 = Math.min(l.anchorX, l.currentX);
+    const x1 = Math.max(l.anchorX, l.currentX);
+    const y0 = Math.min(l.anchorY, l.currentY);
+    const y1 = Math.max(l.anchorY, l.currentY);
+    return {
+      x: x0,
+      y: y0,
+      w: Math.max(1, x1 - x0),
+      h: Math.max(1, y1 - y0)
+    };
+  }
+
+  function updateLassoSelection(startX, startY, currentX, currentY){
+    selected.clear();
+    const x0 = Math.min(startX, currentX);
+    const x1 = Math.max(startX, currentX);
+    const y0 = Math.min(startY, currentY);
+    const y1 = Math.max(startY, currentY);
+    for(const n of notes){
+      const nx = beatsToPx(n.start);
+      const nw = beatsToPx(n.dur);
+      const ny = (PITCH_MAX-n.pitch)*ROW_H+2;
+      const nh = ROW_H-4;
+      if(nx < x1 && nx+nw > x0 && ny < y1 && ny+nh > y0){
+        selected.add(n.id);
+      }
+    }
+  }
+
+  function nudgeSelection(deltaBeats, deltaPitch){
+    if(selected.size === 0) return false;
+    let effectiveBeatDelta = deltaBeats;
+    if(deltaBeats < 0){
+      const earliest = Math.min(...Array.from(selected).map(id => {
+        const n = notes.find(nn => nn.id === id);
+        return n ? n.start : Infinity;
+      }));
+      if(!Number.isFinite(earliest)) return false;
+      effectiveBeatDelta = Math.max(deltaBeats, -earliest);
+    }
+
+    let effectivePitchDelta = deltaPitch;
+    if(deltaPitch !== 0){
+      const pitches = Array.from(selected).map(id => {
+        const n = notes.find(nn => nn.id === id);
+        return n ? n.pitch : null;
+      }).filter(p => p !== null);
+      if(pitches.length === 0) return false;
+      const minPitch = Math.min(...pitches);
+      const maxPitch = Math.max(...pitches);
+      if(deltaPitch > 0){
+        effectivePitchDelta = Math.min(deltaPitch, PITCH_MAX - maxPitch);
+      } else {
+        effectivePitchDelta = Math.max(deltaPitch, PITCH_MIN - minPitch);
+      }
+    }
+
+    if(effectiveBeatDelta === 0 && effectivePitchDelta === 0) return false;
+
+    const ids = Array.from(selected);
+    for(const id of ids){
+      const n = notes.find(nn => nn.id === id);
+      if(!n) continue;
+      if(effectiveBeatDelta !== 0){
+        n.start = Math.max(0, snapBeats(n.start + effectiveBeatDelta));
+      }
+      if(effectivePitchDelta !== 0){
+        n.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, n.pitch + effectivePitchDelta));
+      }
+      refreshNoteGraphics(n.id);
+    }
+
+    return true;
+  }
+
   // ====== Mouse / Interaction ==============================================
   // Drag object shapes:
-  // - {mode:'move-one'|'move-group'|'resizeL'|'resizeR'|'new'|'lasso', ...}
+  // - {mode:'move-one'|'move-group'|'resizeL'|'resizeR'|'new'|'lasso'|'shift-primed', ...}
 
   roll.addEventListener('mousedown', (e)=>{
     const p = gridPos(e);
@@ -463,42 +541,62 @@
     const isShift = e.shiftKey;
     const isAlt = e.altKey;
 
-    if(isShift && !g){
-      // Start lasso selection
-      lasso = {x: p.x, y: p.y, w: 1, h: 1, startX: p.x, startY: p.y};
-      drag = {mode:'lasso'};
-      renderGrid();
+    if(isShift){
+      drag = {
+        mode: 'shift-primed',
+        noteId: g ? parseInt(g.dataset.id,10) : null,
+        startX: p.x,
+        startY: p.y
+      };
       return;
     }
 
     if(g){
       const id = parseInt(g.dataset.id,10);
-      // Selection toggle with Shift
-      if(isShift && !selected.has(id)){
-        selected.add(id); refreshNoteGraphics(id); return;
-      } else if(isShift && selected.has(id)){
-        selected.delete(id); refreshNoteGraphics(id); return;
-      }
 
       const n = notes.find(x=>x.id===id);
       if(!n) return;
 
       // Decide group vs single
-      const movingIds = selected.size>0 && selected.has(id) ? Array.from(selected) : [id];
-      const snapshot = movingIds.map(i=>{
+      let movingIds = selected.size>0 && selected.has(id) ? Array.from(selected) : [id];
+      let snapshot = movingIds.map(i=>{
         const nn = notes.find(n=>n.id===i);
         return {id:i, start: nn.start, pitch: nn.pitch, dur: nn.dur};
       });
 
       // Clone on Alt
       if(isAlt){
+        const originalIds = movingIds.slice();
+        const originalSnapshot = snapshot.map(s=>({...s}));
         const clones = [];
-        for(const s of snapshot){
+        selected.clear();
+        for(const s of originalSnapshot){
           const orig = notes.find(nn=>nn.id===s.id);
+          if(!orig) continue;
           const c = {...orig, id: ++idSeq};
           notes.push(c);
           selected.add(c.id);
+          addNoteToSVG(c);
           clones.push(c.id);
+        }
+        if(clones.length){
+          for(const originalId of originalIds){
+            refreshNoteGraphics(originalId);
+          }
+          movingIds = clones;
+          snapshot = movingIds.map(i=>{
+            const nn = notes.find(n=>n.id===i);
+            return {id:i, start: nn.start, pitch: nn.pitch, dur: nn.dur};
+          });
+        } else {
+          // Fallback: keep working with the originals if cloning failed
+          selected.clear();
+          for(const s of originalSnapshot){
+            selected.add(s.id);
+            refreshNoteGraphics(s.id);
+          }
+          movingIds = originalIds;
+          snapshot = originalSnapshot;
         }
       }
 
@@ -517,10 +615,13 @@
       }
     } else {
       // Create new note
-      const start = snapBeats(beat);
+      const start = Math.max(0, snapBeats(beat));
       const n = { id: ++idSeq, pitch, start, dur: 1, vel: baseVelocity };
+      const prevSelected = Array.from(selected);
+      selected.clear();
+      for(const sid of prevSelected){ refreshNoteGraphics(sid); }
+      selected.add(n.id);
       notes.push(n); addNoteToSVG(n);
-      selected.clear(); selected.add(n.id);
       drag = {mode:'resizeR', id:n.id, startX:p.x, orig:{start:n.start, dur:n.dur}};
     }
   });
@@ -530,18 +631,27 @@
     const p = gridPos(e);
     const b = pxToBeats(p.x);
 
-    if(drag.mode==='lasso' && lasso){
-      lasso.w = p.x - lasso.startX;
-      lasso.h = p.y - lasso.startY;
-      // Compute selection
-      selected.clear();
-      const x0 = Math.min(lasso.startX, p.x), x1 = Math.max(lasso.startX, p.x);
-      const y0 = Math.min(lasso.startY, p.y), y1 = Math.max(lasso.startY, p.y);
-      for(const n of notes){
-        const nx = beatsToPx(n.start), nw = beatsToPx(n.dur);
-        const ny = (PITCH_MAX-n.pitch)*ROW_H+2, nh=ROW_H-4;
-        if(nx < x1 && nx+nw > x0 && ny < y1 && ny+nh > y0) selected.add(n.id);
+    if(drag.mode==='shift-primed'){
+      const dx = p.x - drag.startX;
+      const dy = p.y - drag.startY;
+      if(Math.hypot(dx, dy) >= LASSO_DRAG_THRESHOLD){
+        drag.mode = 'lasso';
+        lasso = {
+          anchorX: drag.startX,
+          anchorY: drag.startY,
+          currentX: p.x,
+          currentY: p.y
+        };
+        updateLassoSelection(drag.startX, drag.startY, p.x, p.y);
+        renderGrid();
       }
+      return;
+    }
+
+    if(drag.mode==='lasso' && lasso){
+      lasso.currentX = p.x;
+      lasso.currentY = p.y;
+      updateLassoSelection(lasso.anchorX, lasso.anchorY, p.x, p.y);
       renderGrid();
       return;
     }
@@ -550,7 +660,7 @@
       const id = drag.ids[0];
       const n = notes.find(x=>x.id===id); if(!n) return;
       const delta = b - drag.startBeat;
-      n.start = snapBeats(drag.snapshot[0].start + delta);
+      n.start = Math.max(0, snapBeats(drag.snapshot[0].start + delta));
       const row = Math.floor(p.y/ROW_H);
       n.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, PITCH_MAX - row));
       refreshNoteGraphics(id);
@@ -560,14 +670,14 @@
       const deltaRows = row - (PITCH_MAX - drag.snapshot[0].pitch);
       for(const snap of drag.snapshot){
         const n = notes.find(x=>x.id===snap.id);
-        n.start = snapBeats(snap.start + delta);
+        n.start = Math.max(0, snapBeats(snap.start + delta));
         const newPitch = snap.pitch + ( -deltaRows );
         n.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, newPitch));
         refreshNoteGraphics(n.id);
       }
     } else if(drag.mode==='resizeL'){
       const n = notes.find(x=>x.id===drag.id); if(!n) return;
-      const newStart = snapBeats(pxToBeats(p.x));
+      const newStart = Math.max(0, snapBeats(pxToBeats(p.x)));
       const end = n.start + n.dur;
       n.start = Math.min(newStart, end - (4/gridDiv));
       n.dur = Math.max(4/gridDiv, end - n.start);
@@ -581,7 +691,20 @@
   });
 
   window.addEventListener('mouseup', ()=>{
-    if(drag && drag.mode==='lasso'){ lasso=null; renderGrid(); }
+    if(!drag) return;
+    if(drag.mode==='lasso'){
+      lasso=null;
+      renderGrid();
+    } else if(drag.mode==='shift-primed'){
+      if(drag.noteId!==null){
+        if(selected.has(drag.noteId)){
+          selected.delete(drag.noteId);
+        } else {
+          selected.add(drag.noteId);
+        }
+        refreshNoteGraphics(drag.noteId);
+      }
+    }
     drag = null;
   });
 
@@ -612,13 +735,36 @@
 
   // Delete key removes selection
   window.addEventListener('keydown', (e)=>{
+    const active = document.activeElement;
+    const tag = active && active.tagName ? active.tagName.toLowerCase() : '';
+    const inEditable = tag === 'input' || tag === 'textarea' || tag === 'select' || (active && active.isContentEditable);
+    if(inEditable) return;
+
     if(e.key === 'Delete' || e.key === 'Backspace'){
+      if(selected.size === 0) return;
+      e.preventDefault();
       for(const id of Array.from(selected)){
         const idx = notes.findIndex(n=>n.id===id);
         if(idx>=0) notes.splice(idx,1);
       }
       selected.clear();
       renderGrid();
+      return;
+    }
+
+    let moved = false;
+    if(e.key === 'ArrowLeft'){
+      moved = nudgeSelection(-(e.shiftKey ? 1 : 4/gridDiv), 0);
+    } else if(e.key === 'ArrowRight'){
+      moved = nudgeSelection(e.shiftKey ? 1 : 4/gridDiv, 0);
+    } else if(e.key === 'ArrowUp'){
+      moved = nudgeSelection(0, e.shiftKey ? 12 : 1);
+    } else if(e.key === 'ArrowDown'){
+      moved = nudgeSelection(0, -(e.shiftKey ? 12 : 1));
+    }
+
+    if(moved){
+      e.preventDefault();
     }
   });
 
